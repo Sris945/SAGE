@@ -1,6 +1,6 @@
-# Final checklist (Phase 5–6, against `SAGE_v1_FINAL.md`)
+# Final checklist (Phase 5–6 artifacts)
 
-This doc maps the `SAGE_v1_FINAL.md` **Phase 5–6** checkboxes to concrete artifacts already generated in this workspace, plus how to reproduce them.
+This doc maps **Phase 5–6** (offline RL, simulator) work to concrete artifacts in this workspace and how to reproduce them.
 
 ## Phase 5 — Offline RL (routing policy beats static YAML)
 

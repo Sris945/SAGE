@@ -18,6 +18,7 @@ dependencies = [
     "pyyaml>=6.0",
     "qdrant-client>=1.9",        # Phase 3+
     "rich>=13.0",
+    "prompt_toolkit>=3.0.36",
     "tree-sitter>=0.25.0",       # Phase 4: semantic code reader
     "tree-sitter-languages>=1.10.0",
 ]

@@ -11,7 +11,7 @@ Usage:
   sage run "prompt" --silent    # fully autonomous, skip failed tasks
   sage status                   # show current session state
   sage memory                   # inspect memory layers
-  sage permissions              # workspace + tool policy summary
+  sage permissions              # show policy; `permissions set …` persists in .sage/policy.json
   sage bench                    # run benchmark suite (Phase 4)
   sage bench --compare-policy   # static vs learned routing (Phase 5)
   sage rl export / train-bc     # offline RL dataset + BC (Phase 5)
@@ -326,6 +326,11 @@ def cmd_doctor(args) -> None:
         "  [muted]Hint:[/muted] cap session logs with [accent]SAGE_SESSION_LOG_MAX_MB[/accent] "
         "[muted](see docs/runbook_failures.md).[/muted]"
     )
+    dc.print(
+        "  [muted]Ollama:[/muted] chat waits are unbounded by default; set "
+        "[accent]SAGE_OLLAMA_CHAT_TIMEOUT_S[/accent] [muted](seconds) to cap. "
+        "[accent]SAGE_DISABLE_OLLAMA_SPINNER=1[/accent] [muted]disables stderr loading animation.[/muted]"
+    )
     # Display health summary first to make it obvious what to fix.
     hs = checks.get("health_summary") or {}
     overall = hs.get("status")
@@ -358,11 +363,19 @@ def build_parser(*, exit_on_error: bool = True) -> argparse.ArgumentParser:
             "  sage setup scan && sage setup suggest\n"
             "  sage doctor\n"
             "  sage config show\n"
-            '  sage run "your prompt" --auto\n'
+            '  sage run "your prompt" --auto        # planner may ask clarifying questions (TTY)\n'
+            '  sage run "…" --auto --no-clarify     # skip planner Q&A for a fast run\n'
             "  sage shell                   # interactive (same as bare `sage` in a TTY)\n"
+            "  sage session reset             # clear memory/system_state.json; new session id\n"
             "\n"
             "Bare `sage` in a terminal opens the interactive shell. "
             "Set SAGE_NON_INTERACTIVE=1 to print help instead.\n"
+            "\n"
+            "Ollama: SAGE_OLLAMA_CHAT_TIMEOUT_S sets a max wait in seconds (default: unlimited). "
+            "SAGE_DISABLE_OLLAMA_SPINNER=1 turns off the stderr loading animation.\n"
+            "\n"
+            "Development: from the repo run `pip install -e .` (use a venv), then `rehash` / "
+            "`hash -r` so `which sage` points at that install; SAGE_SHELL_DEBUG=1 shows loaded paths.\n"
             "\nExit codes: 0 success, 1 user/config error, 2 internal failure.\n"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -379,6 +392,11 @@ def build_parser(*, exit_on_error: bool = True) -> argparse.ArgumentParser:
     run_p.add_argument("prompt", help="Natural language goal")
     run_p.add_argument(
         "--auto", action="store_true", help="Skip checkpoints except circuit breaker"
+    )
+    run_p.add_argument(
+        "--no-clarify",
+        action="store_true",
+        help="Skip interactive planner clarifying questions (still runs the DAG)",
     )
     run_p.add_argument("--silent", action="store_true", help="Fully autonomous, skip failed tasks")
     run_p.add_argument(
@@ -398,8 +416,40 @@ def build_parser(*, exit_on_error: bool = True) -> argparse.ArgumentParser:
         help="Print the full command catalog (same as /commands in the interactive shell)",
     )
     sub.add_parser("memory", help="Inspect memory layers")
-    perm_p = sub.add_parser("permissions", help="Show effective workspace + tool policy")
-    perm_p.add_argument("--json", action="store_true", help="Machine-readable output")
+    perm_p = sub.add_parser(
+        "permissions",
+        help="Show or set workspace + tool policy (see `sage permissions set …`)",
+    )
+    perm_p.add_argument(
+        "--json",
+        action="store_true",
+        help="Machine-readable output (show only; not for set/reset)",
+    )
+    perm_sub = perm_p.add_subparsers(dest="permissions_command", required=False)
+    perm_set = perm_sub.add_parser(
+        "set",
+        help="Write .sage/policy.json and apply SAGE_* in this process",
+    )
+    perm_set_sub = perm_set.add_subparsers(dest="permissions_set_command", required=True)
+    perm_set_pol = perm_set_sub.add_parser(
+        "policy",
+        help="standard | strict — strict limits run_command to an allowlist",
+    )
+    perm_set_pol.add_argument("value", choices=["standard", "strict"])
+    perm_set_ws = perm_set_sub.add_parser(
+        "workspace",
+        help="Workspace root(s); same syntax as SAGE_WORKSPACE_ROOT; use 'clear' to drop saved override",
+    )
+    perm_set_ws.add_argument("value")
+    perm_set_sk = perm_set_sub.add_parser(
+        "skills",
+        help="Override skills tree; use 'clear' for bundled package skills",
+    )
+    perm_set_sk.add_argument("value")
+    perm_sub.add_parser(
+        "reset",
+        help="Delete .sage/policy.json and unset SAGE_TOOL_POLICY, SAGE_WORKSPACE_ROOT, SAGE_SKILLS_ROOT",
+    )
     sub.add_parser(
         "shell", help="Interactive slash-command shell (default when bare `sage` in a TTY)"
     )
@@ -593,6 +643,24 @@ def build_parser(*, exit_on_error: bool = True) -> argparse.ArgumentParser:
     )
     prep_p.add_argument("--json", action="store_true", help="Machine-readable output")
 
+    session_p = sub.add_parser(
+        "session",
+        help="Session: reset saved state, refresh view from disk, or show status",
+    )
+    session_sub = session_p.add_subparsers(dest="session_command", required=True)
+    session_sub.add_parser(
+        "reset",
+        help="Delete memory/system_state.json and set a new SAGE_SESSION_ID (fresh bookkeeping)",
+    )
+    session_sub.add_parser(
+        "refresh",
+        help="Re-print session state from disk (same as sage status)",
+    )
+    session_sub.add_parser(
+        "status",
+        help="Show session state (alias of sage status)",
+    )
+
     return parser
 
 
@@ -708,6 +776,16 @@ def _dispatch_command_impl(args: argparse.Namespace, parser: argparse.ArgumentPa
             cmd_eval_e2e(args)
     elif args.command == "prep":
         cmd_prep(args)
+    elif args.command == "session":
+        from sage.cli.session_cmd import cmd_session_refresh, cmd_session_reset
+
+        sc = getattr(args, "session_command", None)
+        if sc == "reset":
+            cmd_session_reset(args)
+        elif sc == "refresh":
+            cmd_session_refresh(args)
+        elif sc == "status":
+            cmd_status(args)
     elif args.command == "doctor":
         cmd_doctor(args)
     elif args.command == "config":
@@ -718,6 +796,19 @@ def _dispatch_command_impl(args: argparse.Namespace, parser: argparse.ArgumentPa
         cmd_setup(args)
     else:
         parser.print_help()
+
+
+def _strip_mistaken_sage_cli_prefix(line: str) -> str:
+    """Inside the shell, users often type ``sage run ...``; only ``run ...`` is valid."""
+    s = line.strip()
+    if s.startswith(":"):
+        s = s[1:].strip()
+    low = s.lower()
+    if low == "sage":
+        return ""
+    if low.startswith("sage "):
+        return s[5:].lstrip()
+    return s
 
 
 def dispatch_command(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
@@ -744,7 +835,9 @@ def cmd_shell(_args) -> None:
       /run "Build a FastAPI app" --auto
       /setup scan
     """
+    from sage.cli.shell_input import read_shell_line
     from sage.cli.shell_support import (
+        SHELL_TOP_LEVEL_COMMANDS,
         clear_terminal,
         format_argparse_error_message,
         print_commands_table,
@@ -754,10 +847,12 @@ def cmd_shell(_args) -> None:
         print_shell_help_screen,
         print_skills_panel,
     )
+    from sage.cli.shell_chat import parse_chat_args, respond_nl_chat, run_shell_chat_loop
+    from sage.cli.shell_intent import ShellIntentKind, classify_shell_line_ex
+    from sage.cli.shell_nl import run_shell_natural_language_goal, shell_natural_language_enabled
 
     try:
         from sage.cli.branding import print_shell_intro
-        from rich.prompt import Prompt
 
         print_shell_intro()
         use_rich = True
@@ -768,17 +863,40 @@ def cmd_shell(_args) -> None:
         use_rich = False
 
     os.environ["SAGE_INSIDE_SHELL"] = "1"
+    os.environ.setdefault("SAGE_SHELL_MODE", "shell")
+    os.environ.setdefault("SAGE_UI_MODE", "agent")
     parser = build_parser(exit_on_error=False)
+
+    # PromptSession (slash menu, completions) must not depend on Rich: if the banner fails,
+    # ``use_rich`` is False but we still want prompt_toolkit + ``/`` dropdown.
+    shell_session = None
+    if not os.environ.get("SAGE_SHELL_SIMPLE_INPUT", "").strip():
+        try:
+            from sage.cli.shell_input import create_shell_prompt_session
+
+            shell_session = create_shell_prompt_session(use_rich=True)
+        except Exception as e:
+            if os.environ.get("SAGE_SHELL_DEBUG", "").strip():
+                print(f"[SAGE shell] debug  create_shell_prompt_session failed: {e!r}")
+            shell_session = None
+
+    if os.environ.get("SAGE_SHELL_DEBUG", "").strip():
+        from sage.cli.shell_input import print_shell_input_diagnostics
+
+        print_shell_input_diagnostics(shell_session=shell_session)
+
+    if use_rich and os.environ.get("SAGE_SHELL_SIMPLE_INPUT", "").strip():
+        from sage.cli.branding import get_console
+
+        get_console().print(
+            "  [accent]![/accent]  [muted]SAGE_SHELL_SIMPLE_INPUT is set — Tab completion disabled. "
+            "Unset for prompt_toolkit (Tab / completions).[/muted]"
+        )
 
     try:
         while True:
             try:
-                if use_rich:
-                    from rich.prompt import Prompt
-
-                    line = Prompt.ask("[brand]SAGE[/brand] [muted]›[/muted]").strip()
-                else:
-                    line = input("sage> ").strip()
+                line = read_shell_line(use_rich=use_rich, session=shell_session).strip()
             except EOFError:
                 print()
                 break
@@ -789,8 +907,15 @@ def cmd_shell(_args) -> None:
                 continue
             if line in {"/exit", "/quit", "exit", "quit"}:
                 break
+            # Sole "/" was stripped to "" and used to do nothing — show catalog (same as /commands).
+            if line == "/":
+                print_commands_table()
+                continue
             if line.startswith("/"):
                 line = line[1:].strip()
+            line = _strip_mistaken_sage_cli_prefix(line)
+            if not line:
+                continue
             try:
                 parts = shlex.split(line)
             except ValueError as e:
@@ -826,6 +951,59 @@ def cmd_shell(_args) -> None:
             if head == "context":
                 print_context_panel()
                 continue
+            if head == "start" and len(parts) >= 2 and parts[1].lower() == "chat":
+                fn, res, init = parse_chat_args(["chat"] + parts[2:])
+                rc = run_shell_chat_loop(
+                    use_rich=use_rich,
+                    session=shell_session,
+                    initial_message=init,
+                    force_new=fn,
+                    resume=res,
+                )
+                if rc == "exit_shell":
+                    break
+                continue
+            if head == "agent":
+                from sage.cli.chat_session_store import clear_chat_session_env
+
+                sub = parts[1].lower() if len(parts) > 1 else ""
+                if sub in ("clear", "clear-context"):
+                    clear_chat_session_env()
+                    if use_rich:
+                        from sage.cli.branding import get_console
+
+                        get_console().print(
+                            "  [muted]Cleared attach context — the next[/muted] [accent]run[/accent] "
+                            "[muted]will not prepend chat history.[/muted]"
+                        )
+                    else:
+                        print("[SAGE] Chat attach context cleared.")
+                else:
+                    os.environ["SAGE_UI_MODE"] = "agent"
+                    if use_rich:
+                        from sage.cli.branding import get_console
+
+                        get_console().print(
+                            "  [accent]Agent mode[/accent] [muted]— describe work in plain English or "
+                            "[/muted][accent]run \"…\"[/accent][muted]. Prior chat (after[/muted] "
+                            "[accent]chat[/accent][muted]) is prepended to the pipeline when "
+                            "[/muted][accent]SAGE_CHAT_ATTACH_TO_RUN=1[/accent][muted] (default).[/muted]"
+                        )
+                    else:
+                        print("[SAGE] Agent mode — NL and run use chat context when available.")
+                continue
+            if head == "chat":
+                fn, res, init = parse_chat_args(parts)
+                rc = run_shell_chat_loop(
+                    use_rich=use_rich,
+                    session=shell_session,
+                    initial_message=init,
+                    force_new=fn,
+                    resume=res,
+                )
+                if rc == "exit_shell":
+                    break
+                continue
             if head == "clear":
                 clear_terminal()
                 continue
@@ -833,6 +1011,31 @@ def cmd_shell(_args) -> None:
                 from sage.cli.branding import get_console
 
                 get_console().print("  [muted]You are already in the SAGE shell.[/muted]")
+                continue
+            if head == "reset":
+                from types import SimpleNamespace
+
+                from sage.cli.session_cmd import cmd_session_reset
+
+                cmd_session_reset(SimpleNamespace())
+                continue
+            if head == "refresh":
+                from types import SimpleNamespace
+
+                from sage.cli.session_cmd import cmd_session_refresh
+
+                cmd_session_refresh(SimpleNamespace())
+                continue
+
+            # Natural language: intent routing (chat/help) vs full pipeline.
+            if head not in SHELL_TOP_LEVEL_COMMANDS and shell_natural_language_enabled():
+                kind, heuristic_hit = classify_shell_line_ex(line)
+                if kind == ShellIntentKind.CODE:
+                    run_shell_natural_language_goal(line, use_rich=use_rich)
+                elif kind == ShellIntentKind.HELP:
+                    print_shell_help_screen()
+                else:
+                    respond_nl_chat(line, use_rich=use_rich, used_heuristic=heuristic_hit)
                 continue
 
             first_token = parts[0]

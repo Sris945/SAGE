@@ -138,6 +138,7 @@ def _default_initial_state(user_prompt: str, *, mode: str, max_retries: int) -> 
         "events": [],
         "mode": mode,
         "resume_from_handoff": False,
+        "clarify": False,
     }
 
 

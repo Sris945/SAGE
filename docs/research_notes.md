@@ -1,6 +1,6 @@
-# Research notes (Spec-parity)
+# Research notes
 
-Reference: `plan final/SAGE_v1_FINAL.md` §29 (RL strategy).
+RL roadmap (tiers and phases) is implemented in code as documented below.
 
 Current status in-code:
 

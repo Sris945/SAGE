@@ -45,3 +45,15 @@ routing:
     fallback: "claude-sonnet-4-5"
     fallback_triggers:
       - primary_failure_count >= 2
+
+  shell_router:
+    primary: "qwen2.5-coder:1.5b"
+    fallback: "qwen2.5-coder:1.5b"
+    fallback_triggers:
+      - primary_failure_count >= 2
+
+  shell_chat:
+    primary: "qwen2.5-coder:1.5b"
+    fallback: "qwen2.5-coder:14b-instruct-q4_K_M"
+    fallback_triggers:
+      - primary_failure_count >= 2

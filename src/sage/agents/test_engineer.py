@@ -17,7 +17,6 @@ Primary model: As per model_router "test_engineer" role.
 """
 
 import json
-import re
 from pathlib import Path
 
 try:
@@ -25,6 +24,8 @@ try:
 except ModuleNotFoundError:  # pragma: no cover
     ollama = None
 
+from sage.agents.llm_parse import parse_json_object
+from sage.cli.branding import print_agent_line
 from sage.orchestrator.model_router import ModelRouter
 from sage.llm.ollama_safe import chat_with_timeout, OllamaTimeout
 from sage.protocol.schemas import AgentInsight
@@ -40,14 +41,13 @@ def _load_template() -> str:
     return ""
 
 
-def _extract_json(text: str) -> dict:
-    text = re.sub(r"<think>[\s\S]*?</think>", "", text).strip()
-    text = re.sub(r"```(?:json)?\s*", "", text)
-    text = re.sub(r"```", "", text)
-    match = re.search(r"\{[\s\S]+\}", text)
-    if not match:
-        raise ValueError(f"No JSON in test_engineer response:\n{text[:300]}")
-    return json.loads(match.group())
+def _normalize_test_output_path(path_str: str) -> str:
+    """Collapse accidental ``tests/tests/...`` (model path bugs) to ``tests/...``."""
+    p = Path(path_str)
+    parts = p.parts
+    if len(parts) >= 2 and parts[0] == "tests" and parts[1] == "tests":
+        return str(Path("tests").joinpath(*parts[2:]))
+    return path_str
 
 
 def _derive_test_path(source_file: str) -> str:
@@ -115,7 +115,7 @@ class TestEngineerAgent:
 
         # Skip non-Python files
         if not source_file.endswith(".py"):
-            print(f"[TestEngineer] Skipping non-Python file: {source_file}")
+            print_agent_line("TestEngineer", f"Skipping non-Python file: {source_file}")
             _emit(
                 "observation",
                 severity="low",
@@ -126,7 +126,9 @@ class TestEngineerAgent:
         test_file = _derive_test_path(source_file)
         source_content = _read_source(source_file)
         if not source_content.strip():
-            print(f"[TestEngineer] Source file empty or missing: {source_file} — skipping.")
+            print_agent_line(
+                "TestEngineer", f"Source file empty or missing: {source_file} — skipping."
+            )
             _emit(
                 "observation",
                 severity="low",
@@ -139,8 +141,8 @@ class TestEngineerAgent:
             task_complexity_score=float(task.get("task_complexity_score", 0.0) or 0.0),
             failure_count=failure_count,
         )
-        print(f"\n[TestEngineer] Using model: {model}")
-        print(f"[TestEngineer] Generating tests for: {source_file}")
+        print_agent_line("TestEngineer", f"Using model: {model}")
+        print_agent_line("TestEngineer", f"Generating tests for: {source_file}")
 
         _emit(
             "decision",
@@ -172,10 +174,10 @@ class TestEngineerAgent:
                     },
                 ],
                 options={"temperature": 0.1},
-                timeout_s=8.0,
+                timeout_s=None,
             )
         except (OllamaTimeout, RuntimeError, Exception) as e:
-            print(f"[TestEngineer] Model call failed/timeout: {e} — failing.")
+            print_agent_line("TestEngineer", f"Model call failed/timeout: {e} — failing.")
             _emit(
                 "risk",
                 severity="high",
@@ -184,11 +186,12 @@ class TestEngineerAgent:
             )
             return {"status": "failed", "test_file": test_file}
 
-        raw = response["message"]["content"]
+        msg = response.get("message") or {}
+        raw = msg.get("content", "") if isinstance(msg, dict) else ""
         try:
-            data = _extract_json(raw)
-        except (ValueError, json.JSONDecodeError) as e:
-            print(f"[TestEngineer] Parse failed: {e} — skipping.")
+            data = parse_json_object(raw)
+        except (ValueError, json.JSONDecodeError, TypeError) as e:
+            print_agent_line("TestEngineer", f"Parse failed: {e} — skipping.")
             _emit(
                 "risk",
                 severity="high",
@@ -198,10 +201,12 @@ class TestEngineerAgent:
             return {"status": "skipped", "test_file": ""}
 
         # Allow model to override test_file path
-        out_file = data.get("file", test_file)
+        out_file = _normalize_test_output_path(str(data.get("file", test_file)))
         code = data.get("patch") or data.get("content") or data.get("code") or data.get("value", "")
+        if not isinstance(code, str):
+            code = json.dumps(code, indent=2) if code is not None else ""
         if not code.strip():
-            print("[TestEngineer] Model returned empty test code — skipping.")
+            print_agent_line("TestEngineer", "Model returned empty test code — skipping.")
             _emit(
                 "observation",
                 severity="low",
@@ -217,7 +222,7 @@ class TestEngineerAgent:
             "epistemic_flags": [],
         }
 
-        print(f"[TestEngineer] PatchRequest ready → {out_file}")
+        print_agent_line("TestEngineer", f"PatchRequest ready → {out_file}")
         _emit(
             "observation",
             severity="low",

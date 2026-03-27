@@ -1,6 +1,8 @@
-## Getting started (Spec-parity)
+## Getting started
 
-See `README.md` for setup and quickstart.
+1. **Bootstrap the repo:** run **`./startup.sh`** (Linux/macOS) or **`.\startup.ps1`** (Windows) from the project root, then activate `.venv`. See **[INSTALL.md](INSTALL.md)**.
+2. **Read `README.md`** for models, Ollama pulls, and quick commands.
+3. **Interactive shell:** run `sage` — slash commands and docs links are described in **[CLI.md](CLI.md)**.
 
 Useful commands:
 

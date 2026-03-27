@@ -4,6 +4,11 @@ from __future__ import annotations
 
 from typing import Annotated, TypedDict
 
+try:
+    from typing import NotRequired  # py311+
+except ImportError:  # pragma: no cover
+    from typing_extensions import NotRequired
+
 
 def task_updates_reducer(old: list[dict] | None, new: list[dict] | None) -> list[dict]:
     """
@@ -47,6 +52,7 @@ class SAGEState(TypedDict):
     events: list
     mode: str  # research | auto | silent
     resume_from_handoff: bool
+    clarify: NotRequired[bool]  # planner Q&A; False with --no-clarify / silent
 
 
 # Optional fields used at runtime but not declared on TypedDict (backward compat).

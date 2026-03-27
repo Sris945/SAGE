@@ -50,7 +50,7 @@ Strict FIFO event processing: [`docs/event_bus.md`](docs/event_bus.md), implemen
 ## Roadmap after v1 (optional)
 
 - **SAGE fine-tuned weights:** ship as another Ollama tag (or HTTP adapter) and point `models.yaml` at it — same plug-and-play mechanism as any user model.
-- **Phase 5 offline RL:** requires sufficient logged trajectories and training pipeline work; see `plan final/SAGE_v1_FINAL.md` §26.1.
+- **Phase 5 offline RL:** requires sufficient logged trajectories and training pipeline work; see `docs/research_notes.md` and `docs/getting_started.md`.
 
 ## CI and release hygiene
 

@@ -264,20 +264,34 @@ def route_model(state: SAGEState) -> SAGEState:
 def run_planner(state: SAGEState) -> SAGEState:
     """
     Planner produces Task DAG from enhanced prompt via real Ollama call.
-    Brainstorming checkpoint runs here in 'research' mode.
+    Optional clarification Q&A when ``brainstorm_questions`` is set (see ``clarify`` flag).
     """
+    import os
+    import sys
+
     from sage.agents.planner import PlannerAgent
+    from sage.cli.clarify import should_offer_clarification
     from sage.orchestrator.task_graph import TaskGraph
 
     agent = PlannerAgent()
     universal_prefix = build_prefix_for_agent(state, agent_role="planner", task_id=None)
+    mode = state.get("mode", "research")
+    clarify_flag = bool(state.get("clarify", True))
+    no_env = bool((os.environ.get("SAGE_NO_CLARIFY") or "").strip())
+    offer = should_offer_clarification(
+        mode=str(mode),
+        clarify_flag=clarify_flag,
+        no_clarify_env=no_env,
+    )
     nodes = agent.run(
         prompt=state["enhanced_prompt"] or state["user_prompt"],
         memory=state["session_memory"],
-        mode=state.get("mode", "research"),
+        mode=mode,
         fix_patterns=state.get("retrieved_fix_patterns") or [],
         universal_prefix=universal_prefix,
         insight_sink=state.get("insight_feed"),
+        clarify_enabled=offer,
+        clarify_tty=bool(getattr(sys.stdin, "isatty", lambda: False)()),
     )
 
     graph = TaskGraph()
@@ -389,25 +403,77 @@ def human_checkpoint(state: SAGEState) -> SAGEState:
         pass
 
     if state.get("mode") == "research":
-        print(f"\n[SAGE] HUMAN CHECKPOINT {checkpoint_type} — review required")
-        if state.get("task_dag", {}).get("nodes"):
-            for node in state["task_dag"].get("nodes", []):
-                print(f"  [{node['status'].upper()}] {node['id']}: {node['description']}")
         try:
             import json
             from pathlib import Path
 
-            base = Path(state.get("repo_path") or ".")
-            plan_path = base / ".sage" / "last_plan.json"
-            plan_path.parent.mkdir(parents=True, exist_ok=True)
-            plan_path.write_text(
-                json.dumps(state.get("task_dag", {}), indent=2),
-                encoding="utf-8",
+            from rich import box
+            from rich.panel import Panel
+            from rich.prompt import Prompt
+            from rich.table import Table
+
+            from sage.cli.branding import get_console
+
+            c = get_console()
+            c.print()
+            nodes = state.get("task_dag", {}).get("nodes") or []
+            tbl = Table(
+                title=f"[accent]Checkpoint {checkpoint_type}[/accent] — review task graph",
+                box=box.ROUNDED,
+                border_style="#0f766e",
+                header_style="accent",
             )
-            print(f"[SAGE] Plan snapshot written: {plan_path}")
+            tbl.add_column("ID", style="brand", no_wrap=True)
+            tbl.add_column("Status", style="muted")
+            tbl.add_column("Task", style="white")
+            for node in nodes:
+                tbl.add_row(
+                    str(node.get("id", "")),
+                    str(node.get("status", "")).upper(),
+                    str(node.get("description", ""))[:120],
+                )
+            plan_note = ""
+            try:
+                base = Path(state.get("repo_path") or ".")
+                plan_path = base / ".sage" / "last_plan.json"
+                plan_path.parent.mkdir(parents=True, exist_ok=True)
+                plan_path.write_text(
+                    json.dumps(state.get("task_dag", {}), indent=2),
+                    encoding="utf-8",
+                )
+                plan_note = f"\n[muted]Snapshot:[/muted] [accent]{plan_path}[/accent]"
+            except Exception:
+                pass
+            c.print(
+                Panel(
+                    tbl,
+                    title="[brand]SAGE[/brand] · human checkpoint",
+                    subtitle=plan_note or None,
+                    border_style="#0d9488",
+                    padding=(0, 1),
+                )
+            )
+            Prompt.ask("Press Enter to continue", default="", show_default=False)
         except Exception:
-            pass
-        input("\n[SAGE] Press Enter to continue...")
+            print(f"\n[SAGE] HUMAN CHECKPOINT {checkpoint_type} — review required")
+            if state.get("task_dag", {}).get("nodes"):
+                for node in state["task_dag"].get("nodes", []):
+                    print(f"  [{node['status'].upper()}] {node['id']}: {node['description']}")
+            try:
+                import json
+                from pathlib import Path
+
+                base = Path(state.get("repo_path") or ".")
+                plan_path = base / ".sage" / "last_plan.json"
+                plan_path.parent.mkdir(parents=True, exist_ok=True)
+                plan_path.write_text(
+                    json.dumps(state.get("task_dag", {}), indent=2),
+                    encoding="utf-8",
+                )
+                print(f"[SAGE] Plan snapshot written: {plan_path}")
+            except Exception:
+                pass
+            input("\n[SAGE] Press Enter to continue...")
     elif state.get("mode") == "auto":
         # Auto mode: do not block and do not spam console output.
         # The checkpoint is still emitted via structured logs/journal.
@@ -818,11 +884,15 @@ def execute_agent(state: SAGEState) -> SAGEState:
 
     This node only performs agent-role work:
       - `coder`: emits `pending_patch_request`
+      - `test_engineer`: emits test `PatchRequest` from dependency artifacts
       - `architect`: marks task completed via blueprint side-effects
       - `reviewer`: produces no patch; verification runs in `verification_gate`
     """
+    from pathlib import Path
+
     from sage.agents.coder import CoderAgent
     from sage.agents.architect import ArchitectAgent
+    from sage.agents.test_engineer import TestEngineerAgent
 
     graph = _rebuild_task_graph(state.get("task_dag", {}))
     task = graph.get(state.get("current_task_id", ""))
@@ -840,7 +910,12 @@ def execute_agent(state: SAGEState) -> SAGEState:
     architect = ArchitectAgent()
     insight_sink = state.get("insight_feed")
 
-    print(f"\n[SAGE] Executing: {task.id} — {task.description} (attempt={attempt})")
+    try:
+        from sage.cli.branding import print_run_task_header
+
+        print_run_task_header(task.id, task.description, attempt)
+    except Exception:
+        print(f"\n[SAGE] Executing: {task.id} — {task.description} (attempt={attempt})")
 
     # Reset tool contract fields for this node.
     pending_patch_request = {}
@@ -944,6 +1019,109 @@ def execute_agent(state: SAGEState) -> SAGEState:
             "task_dag": graph.to_dict(),
             "current_task": vars(task),
             "execution_result": {"status": "ok", "file": coder_result.get("file", "")},
+            "last_error": "",
+            "fix_pattern_hit": False,
+            "fix_pattern_applied": False,
+            "pending_patch_request": pending_patch_request,
+            "pending_patch_source": pending_patch_source,
+            "pending_fix_pattern_context": pending_fix_pattern_context,
+        }
+
+    if task.assigned_agent == "test_engineer":
+        artifacts = state.get("artifacts_by_task") or {}
+        source_file = ""
+        for dep_id in task.dependencies:
+            cand = (artifacts.get(dep_id) or "").strip()
+            if cand.endswith(".py"):
+                name_l = Path(cand).name.lower()
+                if name_l.startswith("test_") or name_l.endswith("_test.py"):
+                    continue
+                source_file = cand
+                break
+        if not source_file:
+            for dep_id in task.dependencies:
+                cand = (artifacts.get(dep_id) or "").strip()
+                if cand.endswith(".py"):
+                    source_file = cand
+                    break
+        if not source_file:
+            for _tid, path in artifacts.items():
+                p = (path or "").strip()
+                if p.endswith(".py") and "test_" not in Path(p).name.lower():
+                    source_file = p
+                    break
+        if not source_file:
+            task.status = "failed"
+            state["last_error"] = (
+                f"test_engineer task {task.id}: no Python artifact from dependencies "
+                f"{task.dependencies!r} — run coder tasks first."
+            )
+            return {
+                **state,
+                "task_dag": graph.to_dict(),
+                "current_task": vars(task),
+                "execution_result": {"status": "error", "file": ""},
+                "fix_pattern_hit": False,
+                "fix_pattern_applied": False,
+                "pending_patch_request": pending_patch_request,
+                "pending_patch_source": pending_patch_source,
+                "pending_fix_pattern_context": pending_fix_pattern_context,
+            }
+
+        te_prefix = build_prefix_for_agent(state, agent_role="test_engineer", task_id=task.id)
+        te_result = TestEngineerAgent().run(
+            source_file=source_file,
+            task={
+                "id": task.id,
+                "description": task.description,
+                "task_complexity_score": float(
+                    getattr(task, "task_complexity_score", 0.0) or 0.0
+                ),
+            },
+            memory=state["session_memory"],
+            failure_count=attempt,
+            universal_prefix=te_prefix,
+            insight_sink=insight_sink,
+        )
+        if te_result.get("status") == "skipped":
+            task.status = "failed"
+            state["last_error"] = te_result.get("test_file") or "test_engineer skipped (source missing or non-Python)"
+            return {
+                **state,
+                "task_dag": graph.to_dict(),
+                "current_task": vars(task),
+                "execution_result": {"status": "error", "file": ""},
+                "fix_pattern_hit": False,
+                "fix_pattern_applied": False,
+                "pending_patch_request": pending_patch_request,
+                "pending_patch_source": pending_patch_source,
+                "pending_fix_pattern_context": pending_fix_pattern_context,
+            }
+
+        if te_result.get("status") != "patch_ready":
+            err = te_result.get("error") or te_result.get("reason") or "test_engineer failed"
+            task.status = "failed"
+            state["last_error"] = str(err)
+            return {
+                **state,
+                "task_dag": graph.to_dict(),
+                "current_task": vars(task),
+                "execution_result": {"status": "error", "file": te_result.get("test_file", "")},
+                "fix_pattern_hit": False,
+                "fix_pattern_applied": False,
+                "pending_patch_request": pending_patch_request,
+                "pending_patch_source": pending_patch_source,
+                "pending_fix_pattern_context": pending_fix_pattern_context,
+            }
+
+        pending_patch_request = te_result.get("patch_request") or {}
+        pending_patch_source = "test_engineer"
+        task.status = "running"
+        return {
+            **state,
+            "task_dag": graph.to_dict(),
+            "current_task": vars(task),
+            "execution_result": {"status": "ok", "file": source_file},
             "last_error": "",
             "fix_pattern_hit": False,
             "fix_pattern_applied": False,
@@ -1303,9 +1481,29 @@ def verification_gate(state: SAGEState) -> SAGEState:
     # Ensure tests exist; if not, emit a PatchRequest and route through tool_executor.
     from pathlib import Path
 
+    emit_guard = dict(state.get("_test_emit_guard") or {})
+    _emits = int(emit_guard.get(task.id, 0))
     test_file = str(Path("tests") / f"test_{Path(artifact_file).stem}.py")
     test_path = Path(test_file)
     if not test_path.exists() or not test_path.read_text(errors="ignore").strip():
+        if _emits >= 4:
+            state["last_error"] = (
+                "Stopped after repeated test-generation attempts. "
+                "Inspect tests/ paths (avoid nested tests/tests/) and src layout."
+            )
+            return {
+                **state,
+                "task_dag": graph.to_dict(),
+                "execution_result": {"status": "error", "file": artifact_file},
+                "fix_pattern_hit": False,
+                "fix_pattern_applied": False,
+                "verification_passed": False,
+                "verification_needs_tool_apply": False,
+                "_test_emit_guard": emit_guard,
+            }
+        emit_guard[task.id] = _emits + 1
+        state["_test_emit_guard"] = emit_guard
+
         test_prefix = build_prefix_for_agent(state, agent_role="test_engineer", task_id=task.id)
         test_result = TestEngineerAgent().run(
             source_file=artifact_file,
@@ -1799,7 +1997,12 @@ def save_memory(state: SAGEState) -> SAGEState:
     # Run memory optimizer — generates .sage-memory.md + prunes stale patterns
     MemoryOptimizerAgent().run()
 
-    print("\n[SAGE] Session complete. Memory saved.")
+    try:
+        from sage.cli.branding import print_session_complete_banner
+
+        print_session_complete_banner()
+    except Exception:
+        print("\n[SAGE] Session complete. Memory saved.")
     return {**state, "session_memory": new_state}
 
 

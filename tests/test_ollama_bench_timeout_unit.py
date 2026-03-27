@@ -16,6 +16,7 @@ class TestOllamaBenchTimeout(unittest.TestCase):
         from sage.llm.ollama_safe import effective_ollama_timeout
 
         self.assertEqual(effective_ollama_timeout(10.0, kind="chat"), 10.0)
+        self.assertIsNone(effective_ollama_timeout(None, kind="chat"))
 
     def test_bench_scales_chat(self):
         from sage.llm.ollama_safe import effective_ollama_timeout
@@ -40,6 +41,12 @@ class TestOllamaBenchTimeout(unittest.TestCase):
         os.environ["SAGE_BENCH_TIMEOUT_MULT"] = "4"
         # 0.25 * 4 = 1.0
         self.assertEqual(effective_ollama_timeout(0.25, kind="embeddings"), 1.0)
+
+    def test_bench_leaves_unlimited_unlimited(self):
+        from sage.llm.ollama_safe import effective_ollama_timeout
+
+        os.environ["SAGE_BENCH"] = "1"
+        self.assertIsNone(effective_ollama_timeout(None, kind="chat"))
 
 
 if __name__ == "__main__":

@@ -14,7 +14,7 @@ Pipeline:
 """
 
 import json
-import re
+import os
 from pathlib import Path
 
 try:
@@ -22,12 +22,28 @@ try:
 except ModuleNotFoundError:  # pragma: no cover
     ollama = None
 
+from sage.agents.llm_parse import parse_json_object
+from sage.cli.branding import print_agent_line
 from sage.orchestrator.model_router import ModelRouter
 from sage.protocol.schemas import TaskNode
 from sage.protocol.schemas import AgentInsight
 from sage.llm.ollama_safe import chat_with_timeout, OllamaTimeout
 
 TEMPLATE_PATH = Path(__file__).parent.parent / "prompt_engine" / "templates" / "planner.md"
+
+
+def _planner_chat_timeout_s() -> float | None:
+    """Override with SAGE_PLANNER_CHAT_TIMEOUT_S; else same as global (see default_chat_timeout_s)."""
+    raw = (os.environ.get("SAGE_PLANNER_CHAT_TIMEOUT_S") or "").strip()
+    if raw:
+        try:
+            v = float(raw)
+            return None if v <= 0 else max(5.0, v)
+        except ValueError:
+            pass
+    from sage.llm.ollama_safe import default_chat_timeout_s
+
+    return default_chat_timeout_s()
 
 
 def _load_template() -> str:
@@ -46,24 +62,61 @@ def _build_system_prompt(template: str, memory: dict, fix_patterns: list) -> str
     )
 
 
+_VALID_AGENTS = frozenset({"coder", "architect", "reviewer", "test_engineer"})
+
+
+def _normalize_assigned_agent(raw: object) -> str:
+    """Map planner / model output to a workflow ``assigned_agent``."""
+    if raw is None:
+        return "coder"
+    s = str(raw).strip().lower().replace(" ", "_").replace("-", "_")
+    aliases = {
+        "te": "test_engineer",
+        "tester": "test_engineer",
+        "tests_engineer": "test_engineer",
+        "test_eng": "test_engineer",
+        "qa": "test_engineer",
+        "arch": "architect",
+        "architecture": "architect",
+        "code": "coder",
+        "implementation": "coder",
+        "implement": "coder",
+        "review": "reviewer",
+    }
+    s = aliases.get(s, s)
+    if s in _VALID_AGENTS:
+        return s
+    if "test" in s and ("eng" in s or s.endswith("_tests")):
+        return "test_engineer"
+    return "coder"
+
+
+def _maybe_upgrade_to_test_engineer(description: str, agent: str) -> str:
+    """If the task is clearly test-only but mislabeled, prefer test_engineer."""
+    if agent == "test_engineer":
+        return agent
+    if agent not in ("coder", "reviewer"):
+        return agent
+    d = (description or "").lower()
+    hints = (
+        "add test",
+        "add tests",
+        "pytest",
+        "unit test",
+        "tests/test",
+        "test file",
+        "write test",
+        "write tests",
+        "test suite",
+    )
+    if any(h in d for h in hints):
+        return "test_engineer"
+    return agent
+
+
 def _extract_json(text: str) -> dict:
-    """
-    Extract the first JSON object from the model's response.
-    Models sometimes wrap JSON in markdown code fences.
-    """
-    # Strip markdown fences
-    text = re.sub(r"```(?:json)?\s*", "", text)
-    text = re.sub(r"```", "", text)
-
-    # Also strip <think>...</think> blocks (qwen3 chain-of-thought)
-    text = re.sub(r"<think>[\s\S]*?</think>", "", text).strip()
-
-    # Find first {...}
-    match = re.search(r"\{[\s\S]+\}", text)
-    if not match:
-        raise ValueError(f"No JSON object found in model response:\n{text[:500]}")
-    return json.loads(match.group())
-
+    """Parse planner JSON via shared :func:`parse_json_object`."""
+    return parse_json_object(text)
 
 def _compute_task_complexity_score(text: str) -> float:
     """
@@ -100,19 +153,30 @@ def _compute_task_complexity_score(text: str) -> float:
 
 def _validate_dag(dag_data: dict) -> list[TaskNode]:
     """Convert raw dict list into typed TaskNode list."""
-    nodes = dag_data.get("dag", dag_data).get("nodes", [])
+    raw = dag_data.get("dag", dag_data)
+    if isinstance(raw, list):
+        nodes = raw
+    elif isinstance(raw, dict):
+        nodes = raw.get("nodes", [])
+    else:
+        nodes = []
     result: list[TaskNode] = []
     for n in nodes:
+        if not isinstance(n, dict):
+            continue
+        desc = str(n.get("description", "") or "")
+        agent = _normalize_assigned_agent(n.get("assigned_agent", "coder"))
+        agent = _maybe_upgrade_to_test_engineer(desc, agent)
         result.append(
             TaskNode(
                 id=n.get("id", f"task_{len(result):03d}"),
-                description=n.get("description", ""),
+                description=desc,
                 dependencies=n.get("dependencies", []),
-                assigned_agent=n.get("assigned_agent", "coder"),
+                assigned_agent=agent,
                 verification=n.get("verification", ""),
                 epistemic_flags=n.get("epistemic_flags", []),
                 strategy_key=n.get("strategy_key", ""),
-                task_complexity_score=_compute_task_complexity_score(n.get("description", "")),
+                task_complexity_score=_compute_task_complexity_score(desc),
                 status="pending",
             )
         )
@@ -133,10 +197,17 @@ class PlannerAgent:
         failure_count: int = 0,
         universal_prefix: str = "",
         insight_sink=None,
+        *,
+        clarify_enabled: bool = True,
+        clarify_tty: bool = True,
+        _clarification_depth: int = 0,
     ) -> list[TaskNode]:
         """
         Returns a list of TaskNode objects.
-        In 'research' mode, prints brainstorm questions and waits.
+
+        When ``clarify_enabled`` and the model returns ``brainstorm_questions``,
+        the user is prompted (TTY) for answers — including in ``auto`` mode unless
+        disabled via ``--no-clarify`` / ``SAGE_NO_CLARIFY``.
         """
 
         # Small helper: emit AgentInsight packets if an orchestrator sink exists.
@@ -183,12 +254,12 @@ class PlannerAgent:
         if universal_prefix:
             system_filled = universal_prefix + "\n\n" + system_filled
 
-        print(f"\n[Planner] Using model: {model}")
-        print(f"[Planner] Generating Task DAG for: {prompt!r}\n")
+        print_agent_line("Planner", f"Using model: {model}")
+        print_agent_line("Planner", f"Generating Task DAG for: {prompt!r}")
 
         # ── Call Ollama ────────────────────────────────────────────────────────
         if ollama is None:
-            print("[Planner] WARNING: ollama module not available; using fallback DAG.")
+            print_agent_line("Planner", "WARNING: ollama module not available; using fallback DAG.")
             _emit(
                 "risk",
                 severity="high",
@@ -223,10 +294,12 @@ class PlannerAgent:
                     },
                 ],
                 options={"temperature": 0.2},
-                timeout_s=6.0,
+                timeout_s=_planner_chat_timeout_s(),
             )
-        except (OllamaTimeout, RuntimeError) as e:
-            print(f"[Planner] Ollama unavailable/timeout ({e}). Falling back to single-task DAG.")
+        except (OllamaTimeout, RuntimeError, Exception) as e:
+            print_agent_line(
+                "Planner", f"Ollama unavailable/timeout ({e}). Falling back to single-task DAG."
+            )
             _emit(
                 "risk",
                 severity="high",
@@ -251,7 +324,9 @@ class PlannerAgent:
         try:
             parsed = _extract_json(raw)
         except (ValueError, json.JSONDecodeError) as e:
-            print(f"[Planner] WARNING: JSON parse failed ({e}). Falling back to single-task DAG.")
+            print_agent_line(
+                "Planner", f"WARNING: JSON parse failed ({e}). Falling back to single-task DAG."
+            )
             _emit(
                 "risk",
                 severity="high",
@@ -268,35 +343,52 @@ class PlannerAgent:
                 )
             ]
 
-        # ── Brainstorm checkpoint ──────────────────────────────────────────────
-        questions = parsed.get("brainstorm_questions", [])
-        if questions and mode == "research":
-            print("\n[Planner] Clarifying questions before generating DAG:")
-            for i, q in enumerate(questions, 1):
-                print(f"  {i}. {q}")
-            print()
-            try:
-                answers = input("[You] Your answers (or press Enter to skip): ").strip()
-            except (EOFError, KeyboardInterrupt):
-                answers = ""
-            if answers:
-                # Re-run with clarifications injected
-                return self.run(
-                    prompt=f"{prompt}\n\nClarifications: {answers}",
-                    memory=memory,
-                    fix_patterns=fix_patterns,
-                    mode=mode,
-                    failure_count=failure_count,
+        # ── Clarification checkpoint (brainstorm_questions) ────────────────────
+        questions = [str(q).strip() for q in (parsed.get("brainstorm_questions") or []) if str(q).strip()]
+        _max_clar_rounds = 2
+        if (
+            questions
+            and clarify_enabled
+            and _clarification_depth < _max_clar_rounds
+            and mode != "silent"
+        ):
+            if clarify_tty:
+                from sage.cli.clarify import collect_clarification_answers
+
+                print_agent_line("Planner", f"Asking {len(questions)} clarifying question(s)…")
+                answers = collect_clarification_answers(questions)
+                if answers:
+                    return self.run(
+                        prompt=f"{prompt}\n\n## User clarifications\n{answers}",
+                        memory=memory,
+                        fix_patterns=fix_patterns,
+                        mode=mode,
+                        failure_count=failure_count,
+                        universal_prefix=universal_prefix,
+                        insight_sink=insight_sink,
+                        clarify_enabled=clarify_enabled,
+                        clarify_tty=clarify_tty,
+                        _clarification_depth=_clarification_depth + 1,
+                    )
+            else:
+                print_agent_line(
+                    "Planner",
+                    f"Clarifying questions not shown (non-interactive); continuing without answers. "
+                    f"Questions were: {questions[:2]}{'…' if len(questions) > 2 else ''}",
                 )
-        # auto/silent mode: skip brainstorm, log questions if any
-        elif questions and mode != "research":
-            print(f"[Planner] Brainstorm questions suppressed in {mode!r} mode.")
+        elif questions and not clarify_enabled:
+            print_agent_line(
+                "Planner",
+                f"Clarification skipped (--no-clarify or SAGE_NO_CLARIFY); {len(questions)} question(s) ignored.",
+            )
 
         # ── Validate + return ──────────────────────────────────────────────────
         try:
             nodes = _validate_dag(parsed)
         except Exception as e:
-            print(f"[Planner] WARNING: DAG validation failed ({e}). Single-task fallback.")
+            print_agent_line(
+                "Planner", f"WARNING: DAG validation failed ({e}). Single-task fallback."
+            )
             _emit(
                 "risk",
                 severity="high",
@@ -314,7 +406,7 @@ class PlannerAgent:
             ]
 
         if not nodes:
-            print("[Planner] WARNING: Empty DAG returned. Single-task fallback.")
+            print_agent_line("Planner", "WARNING: Empty DAG returned. Single-task fallback.")
             _emit(
                 "risk",
                 severity="high",
@@ -331,7 +423,7 @@ class PlannerAgent:
                 )
             ]
 
-        print(f"[Planner] DAG ready — {len(nodes)} task(s):")
+        print_agent_line("Planner", f"DAG ready — {len(nodes)} task(s):")
         for n in nodes:
             deps = f" (depends: {', '.join(n.dependencies)})" if n.dependencies else ""
             print(f"  [{n.id}] {n.description[:80]}{deps}")

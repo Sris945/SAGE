@@ -23,7 +23,6 @@ Fix-pattern storage schema:
 """
 
 import json
-import re
 import hashlib
 from pathlib import Path
 from datetime import datetime, timezone
@@ -33,6 +32,8 @@ try:
 except ModuleNotFoundError:  # pragma: no cover
     ollama = None
 
+from sage.agents.llm_parse import parse_patch_json
+from sage.cli.branding import print_agent_line
 from sage.orchestrator.model_router import ModelRouter
 from sage.protocol.schemas import PatchRequest
 from sage.protocol.schemas import AgentInsight
@@ -47,19 +48,6 @@ def _load_template() -> str:
     if TEMPLATE_PATH.exists():
         return TEMPLATE_PATH.read_text()
     return ""
-
-
-def _extract_json(text: str):
-    text = re.sub(r"<think>[\s\S]*?</think>", "", text).strip()
-    text = re.sub(r"```(?:json)?\s*", "", text)
-    text = re.sub(r"```", "", text)
-    arr_match = re.search(r"\[[\s\S]+\]", text)
-    obj_match = re.search(r"\{[\s\S]+\}", text)
-    if obj_match and (not arr_match or obj_match.start() < arr_match.start()):
-        return json.loads(obj_match.group())
-    if arr_match:
-        return json.loads(arr_match.group())
-    raise ValueError(f"No JSON in debugger response:\n{text[:400]}")
 
 
 def _normalise_data(raw_data) -> dict:
@@ -211,8 +199,9 @@ class DebuggerAgent:
         if universal_prefix:
             system = universal_prefix + "\n\n" + system
 
-        print(f"\n[Debugger] Using model: {model}")
-        print(f"[Debugger] Error: {error[:120]}")
+        print_agent_line("Debugger", f"Using model: {model}")
+        err_disp = (error or "").strip() or "(no error text — check reviewer/verify output)"
+        print_agent_line("Debugger", f"Error: {err_disp[:200]}")
 
         _emit(
             "decision",
@@ -255,7 +244,7 @@ class DebuggerAgent:
                     },
                 ],
                 options={"temperature": 0.05},
-                timeout_s=8.0,
+                timeout_s=None,
             )
         except (OllamaTimeout, RuntimeError, Exception) as e:
             _emit(
@@ -274,14 +263,15 @@ class DebuggerAgent:
                 "epistemic_flags": [],
             }
 
-        raw = response["message"]["content"]
+        msg = response.get("message") or {}
+        raw = msg.get("content", "") if isinstance(msg, dict) else ""
 
         try:
-            raw_data = _extract_json(raw)
+            raw_data = parse_patch_json(raw)
             data = _normalise_data(raw_data)
             patch_req = _to_patch_request(data)
-        except (ValueError, json.JSONDecodeError, KeyError) as e:
-            print(f"[Debugger] Parse failed: {e}")
+        except (ValueError, json.JSONDecodeError, KeyError, TypeError) as e:
+            print_agent_line("Debugger", f"Parse failed: {e}")
             _emit(
                 "risk",
                 severity="high",
@@ -293,11 +283,34 @@ class DebuggerAgent:
                 "file": failed_file,
                 "error": str(e),
                 "suspected_cause": "parse failed",
-                "fix_applied": False,
+                "fix_generated": False,
+                "error_signature": _error_fingerprint(error),
+                "epistemic_flags": [],
             }
 
-        print(f"[Debugger] ✓ Fix generated → {patch_req.file} ({patch_req.operation})")
-        print(f"[Debugger] Suspected cause: {data.get('suspected_cause', 'unknown')}")
+        if not str(patch_req.patch or "").strip():
+            err = "debugger model returned empty patch"
+            print_agent_line("Debugger", err)
+            _emit(
+                "risk",
+                severity="high",
+                content=err,
+                requires_orchestrator_action=True,
+            )
+            return {
+                "status": "failed",
+                "file": failed_file,
+                "error": err,
+                "suspected_cause": "empty_patch",
+                "fix_generated": False,
+                "error_signature": _error_fingerprint(error),
+                "epistemic_flags": [],
+            }
+
+        print_agent_line(
+            "Debugger", f"✓ Fix generated → {patch_req.file} ({patch_req.operation})"
+        )
+        print_agent_line("Debugger", f"Suspected cause: {data.get('suspected_cause', 'unknown')}")
 
         _emit(
             "observation",

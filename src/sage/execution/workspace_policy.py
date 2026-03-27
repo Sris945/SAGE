@@ -13,7 +13,9 @@ from pathlib import Path
 
 
 def default_workspace_roots() -> tuple[Path, ...]:
-    raw = (os.environ.get("SAGE_WORKSPACE_ROOT") or "").strip()
+    from sage.execution.policy_store import effective_workspace_root_str
+
+    raw = effective_workspace_root_str()
     if raw:
         parts = [p.strip() for p in raw.replace(",", os.pathsep).split(os.pathsep) if p.strip()]
         return tuple(Path(p).expanduser().resolve() for p in parts)

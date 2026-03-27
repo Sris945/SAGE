@@ -146,6 +146,8 @@ def test_greenfield_invoke_completes_task(
         "events": [],
         "mode": "auto",
         "resume_from_handoff": False,
+        "clarify": False,
+        "_test_emit_guard": {},
     }
 
     app.invoke(initial_state)

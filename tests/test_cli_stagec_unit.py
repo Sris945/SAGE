@@ -139,10 +139,11 @@ class TestCliStageC(unittest.TestCase):
     def test_shell_parse_error(self):
         import sage.cli.main as cli
 
-        with patch("rich.prompt.Prompt.ask", side_effect=['/run "unterminated', "/exit"]):
-            with patch("sys.stdout", new=io.StringIO()) as out:
-                cli.cmd_shell(None)
-                self.assertIn("parse error", out.getvalue())
+        with patch.dict("os.environ", {"SAGE_SHELL_SIMPLE_INPUT": "1"}, clear=False):
+            with patch("builtins.input", side_effect=['/run "unterminated', "/exit"]):
+                with patch("sys.stdout", new=io.StringIO()) as out:
+                    cli.cmd_shell(None)
+                    self.assertIn("parse error", out.getvalue())
 
 
 if __name__ == "__main__":

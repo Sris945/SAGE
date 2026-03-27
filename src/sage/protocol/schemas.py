@@ -15,7 +15,7 @@ class TaskNode:
     description: str
     dependencies: list[str]
     # MD spec: TaskNode assigned_agent is the worker role responsible for that node.
-    assigned_agent: Literal["coder", "architect", "reviewer"]
+    assigned_agent: Literal["coder", "architect", "reviewer", "test_engineer"]
     status: Literal["pending", "running", "blocked", "failed", "completed"] = "pending"
     retry_count: int = 0
     model_used: str = ""

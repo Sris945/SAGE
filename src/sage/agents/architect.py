@@ -17,7 +17,6 @@ Primary model: As per model_router "architect" role.
 """
 
 import json
-import re
 from pathlib import Path
 
 try:
@@ -25,6 +24,8 @@ try:
 except ModuleNotFoundError:  # pragma: no cover
     ollama = None
 
+from sage.agents.llm_parse import parse_json_object
+from sage.cli.branding import print_agent_line
 from sage.orchestrator.model_router import ModelRouter
 from sage.llm.ollama_safe import chat_with_timeout, OllamaTimeout
 from sage.protocol.schemas import AgentInsight
@@ -38,15 +39,20 @@ def _load_template() -> str:
     return ""
 
 
-def _extract_json(text: str) -> dict:
-    text = re.sub(r"<think>[\s\S]*?</think>", "", text).strip()
-    text = re.sub(r"```(?:json)?\s*", "", text)
-    text = re.sub(r"```", "", text)
-    match = re.search(r"\{[\s\S]+\}", text)
-    if not match:
-        raise ValueError(f"No JSON in architect response:\n{text[:300]}")
-    return json.loads(match.group())
+def _coerce_str_list(val) -> list[str]:
+    if val is None:
+        return []
+    if isinstance(val, list):
+        return [str(x) for x in val]
+    if isinstance(val, dict):
+        return [str(k) for k in val.keys()]
+    return [str(val)]
 
+
+def _coerce_tech_decisions(val) -> dict:
+    if isinstance(val, dict):
+        return {str(k): v for k, v in val.items()}
+    return {}
 
 class ArchitectAgent:
     def __init__(self):
@@ -105,8 +111,8 @@ class ArchitectAgent:
             task_complexity_score=float(task.get("task_complexity_score", 0.0) or 0.0),
             failure_count=failure_count,
         )
-        print(f"\n[Architect] Using model: {model}")
-        print(f"[Architect] Designing blueprint for: {task.get('description', '')[:80]}")
+        print_agent_line("Architect", f"Using model: {model}")
+        print_agent_line("Architect", f"Designing blueprint for: {task.get('description', '')[:80]}")
 
         _emit(
             "decision",
@@ -121,7 +127,9 @@ class ArchitectAgent:
             system = universal_prefix + "\n\n" + system
 
         if ollama is None:
-            print("[Architect] WARNING: ollama module not available; skipping blueprint.")
+            print_agent_line(
+                "Architect", "WARNING: ollama module not available; skipping blueprint."
+            )
             _emit(
                 "risk",
                 severity="high",
@@ -145,10 +153,12 @@ class ArchitectAgent:
                     },
                 ],
                 options={"temperature": 0.0},
-                timeout_s=8.0,
+                timeout_s=None,
             )
         except (OllamaTimeout, RuntimeError, Exception) as e:
-            print(f"[Architect] Model call failed/timeout: {e} — skipping blueprint.")
+            print_agent_line(
+                "Architect", f"Model call failed/timeout: {e} — skipping blueprint."
+            )
             _emit(
                 "risk",
                 severity="high",
@@ -157,11 +167,12 @@ class ArchitectAgent:
             )
             return {"status": "skipped", "blueprint": {}}
 
-        raw = response["message"]["content"]
+        msg = response.get("message") or {}
+        raw = msg.get("content", "") if isinstance(msg, dict) else ""
         try:
-            data = _extract_json(raw)
-        except (ValueError, json.JSONDecodeError) as e:
-            print(f"[Architect] Parse failed: {e} — skipping blueprint.")
+            data = parse_json_object(raw)
+        except (ValueError, json.JSONDecodeError, TypeError) as e:
+            print_agent_line("Architect", f"Parse failed: {e} — skipping blueprint.")
             _emit(
                 "risk",
                 severity="high",
@@ -171,18 +182,19 @@ class ArchitectAgent:
             return {"status": "skipped", "blueprint": {}}
 
         blueprint = {
-            "folders": data.get("folders", []),
-            "files": data.get("files", []),
-            "tech_decisions": data.get("tech_decisions", {}),
-            "summary": data.get("summary", ""),
+            "folders": _coerce_str_list(data.get("folders", [])),
+            "files": _coerce_str_list(data.get("files", [])),
+            "tech_decisions": _coerce_tech_decisions(data.get("tech_decisions", {})),
+            "summary": str(data.get("summary", "") or ""),
         }
 
-        print(
-            f"[Architect] ✓ Blueprint ready — {len(blueprint['files'])} file(s), "
-            f"{len(blueprint['folders'])} folder(s)"
+        print_agent_line(
+            "Architect",
+            f"✓ Blueprint ready — {len(blueprint['files'])} file(s), "
+            f"{len(blueprint['folders'])} folder(s)",
         )
         if blueprint["summary"]:
-            print(f"[Architect]   {blueprint['summary']}")
+            print_agent_line("Architect", f"  {blueprint['summary']}")
 
         _emit(
             "observation",

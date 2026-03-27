@@ -26,9 +26,10 @@ simialr stuff/
 src/*.egg-info/
 *.egg-info/
 
-# Optional: duplicate planning drafts (track `plan final/` or `docs/` instead)
+# Local planning drafts (optional) — do not ship draft spec trees
 plan v1/
 plan v2/
+plan final/
 
 # IDE/editor
 .vscode/

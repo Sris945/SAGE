@@ -1,8 +1,8 @@
 """
 Spec-parity tools shim: filesystem operations.
 
-This is a thin wrapper over `sage.execution.executor.ToolExecutionEngine` so the
-codebase can match `SAGE_v1_FINAL.md`'s repo-structure expectations.
+This is a thin wrapper over `sage.execution.executor.ToolExecutionEngine` for
+filesystem-oriented tool operations used by the pipeline.
 """
 
 from __future__ import annotations

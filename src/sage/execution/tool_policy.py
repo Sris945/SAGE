@@ -9,7 +9,6 @@ Env:
 
 from __future__ import annotations
 
-import os
 import shlex
 from pathlib import Path
 
@@ -61,8 +60,9 @@ _STRICT_ALLOW_BASENAMES: frozenset[str] = frozenset(
 
 
 def tool_policy_mode() -> str:
-    m = (os.environ.get("SAGE_TOOL_POLICY") or "standard").strip().lower()
-    return m if m in ("standard", "strict") else "standard"
+    from sage.execution.policy_store import effective_tool_policy
+
+    return effective_tool_policy()
 
 
 def parse_command_argv(patch: str) -> list[str]:
@@ -95,7 +95,7 @@ def check_run_command_policy(patch: str) -> None:
     if base not in _STRICT_ALLOW_BASENAMES:
         raise SafetyViolation(
             f"strict policy: executable {base!r} not in allowlist "
-            f"(set SAGE_TOOL_POLICY=standard to disable)"
+            f"(sage permissions set policy standard — or SAGE_TOOL_POLICY=standard)"
         )
 
 

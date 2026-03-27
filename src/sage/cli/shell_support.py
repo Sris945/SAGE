@@ -29,13 +29,36 @@ COMMAND_CATALOG: tuple[CommandRow, ...] = (
         "Print this catalog (shell: /commands)",
         "commands",
     ),
-    CommandRow("run", "Pipeline from a natural-language goal", 'run "Add a /health route" --auto'),
+    CommandRow(
+        "run",
+        "Pipeline: goal → plan → code (optional planner Q&A unless --no-clarify)",
+        'run "Add a /health route" --auto',
+    ),
+    CommandRow(
+        "chat",
+        "Chat thread (Ollama); transcript → next run; chat new | chat resume",
+        "chat new",
+    ),
+    CommandRow(
+        "start chat",
+        "Same as chat — Cursor-style thread under .sage/chat_sessions/",
+        "start chat",
+    ),
+    CommandRow(
+        "agent",
+        "Build mode hint; agent clear — drop chat attach for next run",
+        "agent clear",
+    ),
     CommandRow("prep", "Hardware-aware Ollama stack + pull list", "prep"),
     CommandRow("init", "Bootstrap .sage/ + memory/ here", "init"),
     CommandRow("doctor", "Environment, models, ollama, docker checks", "doctor"),
     CommandRow("status", "Last session state (memory/system_state.json)", "status"),
     CommandRow("memory", "List memory layer files", "memory"),
-    CommandRow("permissions", "Workspace + tool policy summary", "permissions --json"),
+    CommandRow(
+        "permissions",
+        "Show/set policy ( .sage/policy.json )",
+        "permissions  |  permissions set policy strict",
+    ),
     CommandRow("setup", "Hardware scan / suggest / apply / pull", "setup scan"),
     CommandRow("config", "models.yaml: show | validate | paths | set …", "config show"),
     CommandRow("bench", "Phase-4 benchmark suite", "bench --out memory/benchmarks/run.json"),
@@ -44,6 +67,11 @@ COMMAND_CATALOG: tuple[CommandRow, ...] = (
     CommandRow("cron", "Scheduled jobs", "cron weekly-memory-optimizer"),
     CommandRow("eval", "Trust: golden | e2e | smoke", "eval golden"),
     CommandRow("shell", "This REPL (also: bare `sage` in a TTY)", "shell"),
+    CommandRow(
+        "session",
+        "reset | refresh | status — session bookkeeping",
+        "session reset",
+    ),
 )
 
 
@@ -60,7 +88,18 @@ SHELL_BUILTIN_COMMANDS: frozenset[str] = frozenset(
         "clear",
         "exit",
         "quit",
+        "reset",
+        "refresh",
+        "chat",
+        "start",
+        "agent",
     }
+)
+
+
+# First token must be one of these to use CLI argparse; otherwise the line is treated as a natural-language goal (pipeline).
+SHELL_TOP_LEVEL_COMMANDS: frozenset[str] = frozenset(
+    "run status commands memory permissions shell init setup doctor config bench rl sim cron eval prep session".split()
 )
 
 
@@ -114,6 +153,37 @@ def skill_id_from_path(skill_md: Path) -> str:
     return "/".join(parts) if parts else rel.as_posix()
 
 
+def print_shell_chat_stub() -> None:
+    """NL + pipeline help (``/chat`` now opens the interactive chat loop in the shell)."""
+    from rich import box
+    from rich.panel import Panel
+
+    from sage.cli.branding import get_console
+
+    c = get_console()
+    c.print()
+    c.print(
+        Panel(
+            "[white]Use[/white] [accent]/chat[/accent] [white]for multi-turn local chat[/white] (small Ollama model). "
+            "[accent]/back[/accent] [muted]returns to the shell.[/muted]\n\n"
+            "[white]Natural language at the shell prompt[/white] routes by intent: greetings and small talk go to "
+            "chat; coding goals use the pipeline (planner → agents → verify). "
+            "[muted]Set[/muted] [accent]SAGE_SHELL_INTENT=off[/accent] [muted]to always use the pipeline for NL.[/muted]\n\n"
+            "[muted]• Default NL uses[/muted] [accent]research[/accent] [muted]mode;[/muted] "
+            "[accent]SAGE_SHELL_NL_AUTO=1[/accent] [muted]for autonomous runs.\n"
+            "•[/muted] [accent]run \"…\"[/accent] [muted]with[/muted] [accent]--auto[/accent] [muted]or "
+            "[accent]--no-clarify[/accent] [muted]for explicit flags.\n"
+            "•[/muted] [accent]/commands[/accent] [muted]lists verbs;[/muted] [accent]/[/accent] "
+            "[muted]opens the command menu.[/muted]",
+            title="[brand]SAGE[/brand] · natural language + pipeline",
+            border_style="#0d9488",
+            box=box.ROUNDED,
+            padding=(0, 1),
+        )
+    )
+    c.print()
+
+
 def print_commands_table() -> None:
     from rich import box
     from rich.table import Table
@@ -140,9 +210,13 @@ def print_commands_table() -> None:
     c.print()
     c.print(
         "  [muted]Shell-only:[/muted] [accent]/help[/accent]  [accent]/commands[/accent]  "
-        "[accent]/skill[/accent]  [accent]/model[/accent]  [accent]/context[/accent]  [accent]/clear[/accent]"
+        "[accent]/skill[/accent]  [accent]/model[/accent]  [accent]/context[/accent]  [accent]/clear[/accent]  "
+        "[accent]/reset[/accent]  [accent]/refresh[/accent]  [accent]/chat[/accent]  [accent]/agent[/accent]"
     )
     c.print()
+    from sage.cli.doc_links import print_docs_links_footer
+
+    print_docs_links_footer()
 
 
 def print_shell_help_screen() -> None:
@@ -152,12 +226,36 @@ def print_shell_help_screen() -> None:
 
     c = get_console()
     body = (
-        "[accent]/commands[/accent] or [accent]/help[/accent] — full command table\n"
+        "[white]Slash REPL[/white] [muted]— input uses[/muted] [accent]prompt_toolkit[/accent] [muted](not plain[/muted] "
+        "[accent]input()[/accent][muted]): the buffer is updated as you type; pressing[/muted] [accent]/[/accent] "
+        "[muted]inserts slash and opens the completion menu so you can filter commands (e.g.[/muted] [accent]/h[/accent][muted]) "
+        "before Enter submits the line.[/muted]\n\n"
+        "[accent]/commands[/accent] or [accent]/help[/accent] — full command table + doc links\n"
         "[accent]/skill[/accent] — list bundled prompt skills (injected by role)\n"
         "[accent]/model[/accent] — routing summary from models.yaml\n"
         "[accent]/context[/accent] — memory dir, config path, env hints\n"
         "[accent]/clear[/accent] — clear the terminal\n"
+        "[accent]/reset[/accent] — same as [accent]session reset[/accent]\n"
+        "[accent]/refresh[/accent] — same as [accent]session refresh[/accent]\n"
         "[accent]/exit[/accent] — leave the shell\n"
+        "[accent]/chat[/accent] [muted]·[/muted] [accent]start chat[/accent] [muted]— local LLM thread; transcript attaches to the next[/muted] [accent]run[/accent]\n"
+        "[accent]/agent[/accent] [muted]— agent/build mode reminder;[/muted] [accent]agent clear[/accent] [muted]drops attach context[/muted]\n"
+        "\n"
+        "[accent]/[/accent] [muted]opens the command menu immediately[/muted] (arrow keys + Enter). "
+        "[muted]Tab also works on an empty line.[/muted]\n"
+        "\n"
+        "[muted]Pipeline flags (after[/muted] [accent]run[/accent][muted]):[/muted] "
+        "[accent]--auto[/accent]  [accent]--no-clarify[/accent]  [accent]--silent[/accent]  [accent]--repo PATH[/accent]\n"
+        "[accent]/permissions[/accent] — show policy; [accent]permissions set policy strict[/accent] "
+        "· [accent]permissions reset[/accent]\n"
+        "\n"
+        "[muted]Status bar[/muted] (under the prompt) shows policy, session id, persisted state, cwd, "
+        "and a permissions hint. Set [muted]SAGE_SHELL_NO_STATUSBAR=1[/muted] to hide it.\n"
+        "Set [muted]SAGE_SHELL_HISTORY_SEARCH=1[/muted] for Ctrl+R history search "
+        "(disables completion-while-typing — prompt_toolkit limitation).\n"
+        "Tab completions use readline-style lists by default; "
+        "[muted]SAGE_SHELL_COLUMN_COMPLETIONS=1[/muted] enables the floating column menu "
+        "(needs a full-featured terminal).\n"
         "\n"
         "Everything else is a normal CLI invocation without the [muted]sage[/muted] prefix, e.g.\n"
         '  [brand]/doctor[/brand]   [brand]/prep[/brand]   [brand]/run[/brand] [muted]"your goal"[/muted] [muted]--auto[/muted]'

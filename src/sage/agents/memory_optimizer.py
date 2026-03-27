@@ -52,6 +52,15 @@ def _load_recent_logs(days: int = 7) -> list[str]:
     return entries[-50:]  # cap at 50 most recent lines
 
 
+def _print_opt(msg: str) -> None:
+    try:
+        from sage.cli.branding import print_agent_line
+
+        print_agent_line("MemoryOpt", msg)
+    except Exception:
+        print(f"\n[MemoryOpt] {msg}")
+
+
 def _prune_patterns(patterns: list[dict]) -> list[dict]:
     """Remove fix patterns untouched for STALE_DAYS."""
     cutoff = datetime.now(timezone.utc) - timedelta(days=STALE_DAYS)
@@ -70,7 +79,7 @@ def _prune_patterns(patterns: list[dict]) -> list[dict]:
         except (ValueError, TypeError):
             kept.append(p)  # keep if date is unparseable
     if pruned:
-        print(f"[MemoryOpt] Pruned {pruned} stale fix pattern(s).")
+        _print_opt(f"Pruned {pruned} stale fix pattern(s).")
     # Prefer success_rate (EMA); fall back to times_applied.
     return sorted(
         kept,
@@ -127,7 +136,7 @@ class MemoryOptimizerAgent:
         Run the memory optimizer. Returns:
           {"status": "ok", "pruned_patterns": int, "updated_memory_file": str}
         """
-        print("\n[MemoryOpt] Running memory optimization...")
+        _print_opt("Running memory optimization...")
 
         state = _load_json(STATE_FILE, {})
         patterns = _load_json(FIX_PATTERNS_FILE, [])
@@ -143,7 +152,7 @@ class MemoryOptimizerAgent:
         # 2. Generate .sage-memory.md
         content = _generate_sage_memory(state, cleaned, recent_logs)
         SAGE_MEMORY_FILE.write_text(content)
-        print(f"[MemoryOpt] ✓ .sage-memory.md updated ({len(content.splitlines())} lines)")
+        _print_opt(f"✓ .sage-memory.md updated ({len(content.splitlines())} lines)")
 
         return {
             "status": "ok",

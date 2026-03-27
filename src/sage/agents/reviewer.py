@@ -20,7 +20,6 @@ Phase 5 gate (what blocks task completion):
 
 import ast
 import json
-import re
 from pathlib import Path
 from dataclasses import dataclass
 
@@ -29,6 +28,8 @@ try:
 except ModuleNotFoundError:  # pragma: no cover
     ollama = None
 
+from sage.agents.llm_parse import parse_json_object
+from sage.cli.branding import print_agent_line
 from sage.orchestrator.model_router import ModelRouter
 from sage.llm.ollama_safe import chat_with_timeout, OllamaTimeout
 from sage.protocol.schemas import AgentInsight
@@ -69,15 +70,14 @@ def _static_checks(file: str, content: str) -> list[str]:
     return issues
 
 
-def _extract_review_json(text: str) -> dict:
-    text = re.sub(r"<think>[\s\S]*?</think>", "", text).strip()
-    text = re.sub(r"```(?:json)?\s*", "", text)
-    text = re.sub(r"```", "", text)
-    match = re.search(r"\{[\s\S]+\}", text)
-    if not match:
-        raise ValueError(f"No JSON in reviewer response:\n{text[:300]}")
-    return json.loads(match.group())
-
+def _coerce_issues(val) -> list[str]:
+    if val is None:
+        return []
+    if isinstance(val, str):
+        return [val] if val.strip() else []
+    if isinstance(val, list):
+        return [str(x) for x in val]
+    return [str(val)]
 
 class ReviewerAgent:
     def __init__(self):
@@ -138,7 +138,7 @@ class ReviewerAgent:
         issues = _static_checks(file, content)
 
         if issues:
-            print(f"[Reviewer] Static check FAILED: {issues[0]}")
+            print_agent_line("Reviewer", f"Static check FAILED: {issues[0]}")
             _emit(
                 "risk",
                 severity="high",
@@ -161,8 +161,8 @@ class ReviewerAgent:
         )
         if universal_prefix:
             system = universal_prefix + "\n\n" + system
-        print(f"[Reviewer] Using model: {model}")
-        print(f"[Reviewer] Reviewing: {file}")
+        print_agent_line("Reviewer", f"Using model: {model}")
+        print_agent_line("Reviewer", f"Reviewing: {file}")
 
         _emit(
             "decision",
@@ -184,11 +184,11 @@ class ReviewerAgent:
                     },
                 ],
                 options={"temperature": 0.0},
-                timeout_s=5.0,
+                timeout_s=None,
             )
         except (OllamaTimeout, RuntimeError, Exception) as e:
             # Fall back to static checks only (already executed above).
-            print(f"[Reviewer] Model call failed: {e} — using static checks only.")
+            print_agent_line("Reviewer", f"Model call failed: {e} — using static checks only.")
             _emit(
                 "observation",
                 severity="low",
@@ -202,12 +202,13 @@ class ReviewerAgent:
                 suggestion="LLM review skipped (model unavailable; static checks only)",
             )
 
-        raw = response["message"]["content"]
+        msg = response.get("message") or {}
+        raw = msg.get("content", "") if isinstance(msg, dict) else ""
         try:
-            data = _extract_review_json(raw)
-        except (ValueError, json.JSONDecodeError) as e:
+            data = parse_json_object(raw)
+        except (ValueError, json.JSONDecodeError, TypeError) as e:
             # Fall back to static checks only (already executed above).
-            print(f"[Reviewer] Parse failed: {e} — using static checks only.")
+            print_agent_line("Reviewer", f"Parse failed: {e} — using static checks only.")
             _emit(
                 "observation",
                 severity="low",
@@ -222,15 +223,18 @@ class ReviewerAgent:
             )
 
         verdict = str(data.get("verdict", "PASS")).upper()
-        score = float(data.get("score", 0.7))
-        issues = data.get("issues", [])
-        suggestion = data.get("suggestion", "")
+        try:
+            score = float(data.get("score", 0.7))
+        except (TypeError, ValueError):
+            score = 0.7
+        issues = _coerce_issues(data.get("issues", []))
+        suggestion = str(data.get("suggestion", "") or "")
 
         passed = verdict == "PASS" and score >= 0.5
         if passed:
-            print(f"[Reviewer] ✓ PASS (score={score:.2f})")
+            print_agent_line("Reviewer", f"✓ PASS (score={score:.2f})")
         else:
-            print(f"[Reviewer] ✗ FAIL (score={score:.2f}) — {issues[:1]}")
+            print_agent_line("Reviewer", f"✗ FAIL (score={score:.2f}) — {issues[:1]}")
 
         _emit(
             "observation",

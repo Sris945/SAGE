@@ -22,7 +22,6 @@ Pipeline:
 """
 
 import json
-import re
 from pathlib import Path
 
 try:
@@ -30,6 +29,8 @@ try:
 except ModuleNotFoundError:  # pragma: no cover
     ollama = None
 
+from sage.agents.llm_parse import parse_patch_json
+from sage.cli.branding import print_agent_line
 from sage.orchestrator.model_router import ModelRouter
 from sage.protocol.schemas import PatchRequest
 from sage.protocol.schemas import AgentInsight
@@ -62,21 +63,6 @@ def _load_user_rules() -> str:
         return "No project-specific rules defined."
     # Project rules should come first; agent-specific + legacy last.
     return "\n\n".join(parts)
-
-
-def _extract_json(text: str) -> dict | list:
-    """Strip think tags and markdown fences, then extract first JSON value."""
-    text = re.sub(r"<think>[\s\S]*?</think>", "", text).strip()
-    text = re.sub(r"```(?:json)?\s*", "", text)
-    text = re.sub(r"```", "", text)
-    # Try array first (RFC JSON Patch format some models emit)
-    arr_match = re.search(r"\[[\s\S]+\]", text)
-    obj_match = re.search(r"\{[\s\S]+\}", text)
-    if obj_match and (not arr_match or obj_match.start() < arr_match.start()):
-        return json.loads(obj_match.group())
-    if arr_match:
-        return json.loads(arr_match.group())
-    raise ValueError(f"No JSON in response:\n{text[:400]}")
 
 
 def _normalise_data(raw_data) -> dict:
@@ -245,8 +231,8 @@ class CoderAgent:
         # Append strategy-specific instruction after the universal prefix.
         system = system + "\n\n" + system_suffix
 
-        print(f"\n[Coder] Using model: {model}")
-        print(f"[Coder] Task: {task.get('description', '')[:80]}")
+        print_agent_line("Coder", f"Using model: {model}")
+        print_agent_line("Coder", f"Task: {task.get('description', '')[:80]}")
 
         # ── Call Ollama ────────────────────────────────────────────────────────
         if ollama is None:
@@ -274,7 +260,7 @@ class CoderAgent:
                     },
                 ],
                 options={"temperature": temperature},
-                timeout_s=10.0,
+                timeout_s=None,
             )
         except (OllamaTimeout, RuntimeError, Exception) as e:
             _emit(
@@ -285,15 +271,16 @@ class CoderAgent:
             )
             return {"status": "failed", "file": "", "operation": "", "reason": "", "error": str(e)}
 
-        raw = response["message"]["content"]
+        msg = response.get("message") or {}
+        raw = msg.get("content", "") if isinstance(msg, dict) else ""
 
         # ── Parse ──────────────────────────────────────────────────────────────
         try:
-            raw_data = _extract_json(raw)
+            raw_data = parse_patch_json(raw)
             data = _normalise_data(raw_data)
             patch_req = _to_patch_request(data)
-        except (ValueError, json.JSONDecodeError, KeyError) as e:
-            print(f"[Coder] Parse failed: {e}")
+        except (ValueError, json.JSONDecodeError, KeyError, TypeError) as e:
+            print_agent_line("Coder", f"Parse failed: {e}")
             _emit(
                 "risk",
                 severity="high",
@@ -308,9 +295,28 @@ class CoderAgent:
                 "error": str(e),
             }
 
-        print(f"[Coder] PatchRequest ready → {patch_req.file} ({patch_req.operation})")
+        if not str(patch_req.patch or "").strip():
+            err = "model returned empty patch content"
+            print_agent_line("Coder", err)
+            _emit(
+                "risk",
+                severity="high",
+                content=err,
+                requires_orchestrator_action=True,
+            )
+            return {
+                "status": "failed",
+                "file": patch_req.file,
+                "operation": patch_req.operation,
+                "reason": err,
+                "error": err,
+            }
+
+        print_agent_line(
+            "Coder", f"PatchRequest ready → {patch_req.file} ({patch_req.operation})"
+        )
         if patch_req.epistemic_flags:
-            print(f"[Coder] Flags: {', '.join(patch_req.epistemic_flags)}")
+            print_agent_line("Coder", f"Flags: {', '.join(patch_req.epistemic_flags)}")
 
         _emit(
             "observation",

@@ -16,8 +16,9 @@ RULES:
 - file: the test file path (use the TEST FILE path above)
 - operation: always "create"
 - patch: the complete Python test file content as a string
+- Match the **actual** implementation (functions, classes, HTTP layer if any). **Do not** assume FastAPI unless the source uses it.
 
-EXAMPLE OUTPUT:
-{"file":"tests/test_app.py","operation":"create","patch":"import pytest\nfrom app import app\n\ndef test_health_endpoint():\n    from fastapi.testclient import TestClient\n    client = TestClient(app)\n    response = client.get('/health')\n    assert response.status_code == 200\n    assert response.json() == {'status': 'ok'}\n"}
+EXAMPLE OUTPUT (shape only):
+{"file":"tests/test_app.py","operation":"create","patch":"import pytest\nimport src.app as app_mod\n\ndef test_importable():\n    assert app_mod is not None\n"}
 
 NOW OUTPUT THE JSON PATCHREQUEST WITH THE TEST CODE:

@@ -44,7 +44,9 @@ def _sage_package_root() -> Path:
 
 
 def _bundled_skills_root() -> Path:
-    override = (os.environ.get("SAGE_SKILLS_ROOT") or "").strip()
+    from sage.execution.policy_store import effective_skills_root_str
+
+    override = effective_skills_root_str()
     if override:
         return Path(override).expanduser().resolve()
     return _sage_package_root() / "assets" / "skills"
