@@ -9,9 +9,9 @@ __pycache__/
 .venv/
 venv/
 
-# Runtime/state artifacts
-memory/
-datasets/
+# Runtime/state artifacts (repo root only — do not ignore src/sage/memory/)
+/memory/
+/datasets/
 bench*.json
 *_out.json
 *.log
