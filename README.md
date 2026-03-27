@@ -134,11 +134,3 @@ startup.sh / .ps1  # Optional venv + editable install
 See **[`CONTRIBUTING.md`](CONTRIBUTING.md)** — unit tests, benchmarks, live Ollama bar.
 
 ---
-
-## License
-
-Add a `LICENSE` file in the repo root (e.g. MIT or Apache-2.0) when you publish; until then, follow your organization’s policy.
-# S.A.G.E
-# S.A.G.E
-# S.A.G.E
-# S.A.G.E
