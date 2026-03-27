@@ -1,5 +1,7 @@
 import io
 import json
+import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -43,6 +45,45 @@ class TestCliStageC(unittest.TestCase):
                     detail = payload["configured_models_present"]["detail"]
                     self.assertIn("external_configured", detail)
                     self.assertIn("claude-sonnet-4-5", detail["external_configured"])
+
+    def test_doctor_json_github_actions_without_dot_venv(self):
+        """Regression: GitHub Actions sets CI=true and has no repo-root .venv."""
+        import sage.cli.main as cli
+
+        def fake_run(cmd, capture_output=True, text=True, timeout=5):  # noqa: ARG001
+            class R:
+                returncode = 0
+                stdout = (
+                    "NAME ID SIZE MODIFIED\nqwen2.5-coder:1.5b x 1GB now\n"
+                    if cmd and cmd[0] == "ollama"
+                    else "ok"
+                )
+                stderr = ""
+
+            return R()
+
+        orig_exists = Path.exists
+
+        def exists_hide_dot_venv(self):
+            if self.name == ".venv":
+                try:
+                    if self.resolve() == (Path.cwd() / ".venv").resolve():
+                        return False
+                except OSError:
+                    pass
+            return orig_exists(self)
+
+        with patch.dict(os.environ, {"CI": "true", "GITHUB_ACTIONS": "true"}, clear=False):
+            with patch.object(sys, "prefix", sys.base_prefix):
+                with patch("subprocess.run", side_effect=fake_run):
+                    with patch.object(Path, "exists", exists_hide_dot_venv):
+                        with patch("sys.argv", ["sage", "doctor", "--json"]):
+                            with patch("sys.stdout", new=io.StringIO()) as out:
+                                cli.main()
+                                payload = json.loads(out.getvalue())
+        self.assertEqual(payload["health_summary"]["status"], "degraded")
+        self.assertTrue(payload["venv"]["ok"])
+        self.assertIn("CI", payload["venv"]["detail"])
 
     def test_config_set_updates_role(self):
         import sage.cli.main as cli

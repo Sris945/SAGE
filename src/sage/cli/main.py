@@ -248,14 +248,21 @@ def cmd_doctor(args) -> None:
         print_banner(tagline=False)
 
     checks["python"] = {"ok": sys.version_info >= (3, 10), "detail": sys.version.split()[0]}
-    # `.venv/` at repo root is the local convention; CI uses setup-python's venv (no `.venv` dir).
+    # `.venv/` at repo root is the local convention. GitHub Actions (and similar) use the
+    # runner Python with no project `.venv` and often sys.prefix == base_prefix — still OK.
     in_any_venv = sys.prefix != getattr(sys, "base_prefix", sys.prefix)
-    venv_ok = Path(".venv").exists() or in_any_venv
-    venv_detail = (
-        str(Path(".venv").resolve())
-        if Path(".venv").exists()
-        else (f"active venv: {sys.prefix}" if in_any_venv else "no .venv/ and not in a virtualenv")
+    ci_env = (os.environ.get("CI", "").lower() in ("1", "true", "yes")) or (
+        os.environ.get("GITHUB_ACTIONS", "") == "true"
     )
+    venv_ok = Path(".venv").exists() or in_any_venv or ci_env
+    if Path(".venv").exists():
+        venv_detail = str(Path(".venv").resolve())
+    elif in_any_venv:
+        venv_detail = f"active venv: {sys.prefix}"
+    elif ci_env:
+        venv_detail = "CI/automation environment (no project .venv)"
+    else:
+        venv_detail = "no .venv/ and not in a virtualenv"
     checks["venv"] = {"ok": venv_ok, "detail": venv_detail}
     checks["memory_dir_writable"] = {"ok": True, "detail": "memory/"}
     try:
