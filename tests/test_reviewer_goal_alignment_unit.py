@@ -7,10 +7,18 @@ import unittest
 from sage.agents.reviewer import (
     ReviewerAgent,
     _goal_alignment_issues,
+    _static_checks,
 )
 
 
 class TestReviewerGoalAlignment(unittest.TestCase):
+    def test_requirements_txt_two_lines_not_flagged_short(self):
+        issues = _static_checks(
+            "requirements.txt",
+            "fastapi>=0.100\nuvicorn[standard]>=0.30\n",
+        )
+        self.assertFalse(any("short" in i.lower() for i in issues))
+
     def test_helper_detects_missing_fastapi(self):
         issues = _goal_alignment_issues(
             "Implement FastAPI with GET /health in src/app.py",

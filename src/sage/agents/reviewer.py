@@ -54,13 +54,27 @@ def _load_template() -> str:
     return ""
 
 
+def _short_manifest_ok(file: str) -> bool:
+    """Dependency/config files are often 1–2 lines; do not require 3+ lines."""
+    name = Path(str(file).replace("\\", "/")).name.lower()
+    return name in (
+        "requirements.txt",
+        "requirements-dev.txt",
+        "requirements-test.txt",
+        "constraints.txt",
+        "setup.cfg",
+        "pyproject.toml",
+        "pipfile",
+    )
+
+
 def _static_checks(file: str, content: str) -> list[str]:
     """Fast local checks — no model call needed."""
     issues = []
     lines = content.splitlines()
     if not content.strip():
         issues.append("File is empty or whitespace-only.")
-    if len(lines) < 3:
+    if len(lines) < 3 and not _short_manifest_ok(file):
         issues.append(f"File is suspiciously short ({len(lines)} lines).")
     if file.endswith(".py"):
         try:
