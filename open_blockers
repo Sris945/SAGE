@@ -1,0 +1,3 @@
+#!/bin/bash
+
+echo 'GET /health route added'

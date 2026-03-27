@@ -1,0 +1,36 @@
+name: docker-sim-smoke
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "sim/**"
+      - "src/sage/sim/**"
+      - "src/sage/execution/executor.py"
+      - ".github/workflows/docker-sim-smoke.yml"
+
+jobs:
+  sim-docker:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install package
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Build simulator image
+        run: docker build -f sim/Dockerfile -t sage-sim:latest .
+
+      - name: Generate simulator tasks
+        run: sage sim generate --count 100 --out /tmp/sim_tasks_ci.jsonl
+
+      - name: Docker simulator smoke
+        run: sage sim run --tasks /tmp/sim_tasks_ci.jsonl --workers 2 --limit 10 --docker

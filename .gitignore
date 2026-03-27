@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual env
+.venv/
+venv/
+
+# Runtime/state artifacts
+memory/
+datasets/
+bench*.json
+*_out.json
+*.log
+
+# Local experiment / scratch at repo root (not part of the package)
+bench_out.txt
+
+# Large reference trees (not the SAGE product source)
+simialr stuff/
+
+# Editable install metadata
+src/*.egg-info/
+*.egg-info/
+
+# Optional: duplicate planning drafts (track `plan final/` or `docs/` instead)
+plan v1/
+plan v2/
+
+# IDE/editor
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Keep docs tracked (including evidence docs)
+!docs/

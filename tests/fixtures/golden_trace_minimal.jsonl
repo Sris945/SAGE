@@ -1,0 +1,3 @@
+{"type": "MODEL_ROUTING_DECISION", "timestamp": "2026-01-01T00:00:00+00:00", "agent_role": "planner", "selected_model": "qwen2.5-coder:1.5b", "policy_source": "yaml"}
+{"type": "CONTEXT_CLAMPED", "timestamp": "2026-01-01T00:00:01+00:00", "model": "qwen2.5-coder:1.5b", "original_chars": 5000, "after_chars": 100, "cap": 100}
+{"type": "TOKEN_USAGE", "timestamp": "2026-01-01T00:00:02+00:00", "model": "qwen2.5-coder:1.5b", "prompt_tokens": 10, "completion_tokens": 2}

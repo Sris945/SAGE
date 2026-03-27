@@ -1,0 +1,47 @@
+routing:
+  planner:
+    primary: "qwen2.5-coder:1.5b"
+    fallback: "qwen3:14b-q4_K_M"
+    fallback_triggers:
+      - task_complexity_score > 0.8
+      - primary_failure_count >= 2
+
+  architect:
+    primary: "qwen2.5-coder:1.5b"
+    fallback: "qwen3:14b-q4_K_M"
+    fallback_triggers:
+      - task_complexity_score > 0.8
+      - primary_failure_count >= 2
+
+  coder:
+    primary: "qwen2.5-coder:1.5b"
+    fallback: "qwen2.5-coder:14b-instruct-q4_K_M"
+    fallback_triggers:
+      - primary_failure_count >= 2
+
+  debugger:
+    # Match a tag that exists in `ollama list` (e.g. codestral:22b). :latest only works if pulled.
+    primary: "codestral:22b"
+    fallback: "qwen2.5-coder:14b-instruct-q4_K_M"
+    fallback_triggers:
+      # If the primary model is missing/unreachable, we should fall back after
+      # the first failure to avoid retry loops during benchmarks.
+      - primary_failure_count >= 1
+
+  reviewer:
+    primary: "qwen2.5-coder:1.5b"
+    fallback: "qwen2.5-coder:14b-instruct-q4_K_M"
+    fallback_triggers:
+      - primary_failure_count >= 2
+
+  test_engineer:
+    primary: "qwen2.5-coder:1.5b"
+    fallback: "qwen2.5-coder:14b-instruct-q4_K_M"
+    fallback_triggers:
+      - primary_failure_count >= 2
+
+  memory_optimizer:
+    primary: "qwen3:14b-q4_K_M"
+    fallback: "claude-sonnet-4-5"
+    fallback_triggers:
+      - primary_failure_count >= 2

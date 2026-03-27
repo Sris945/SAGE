@@ -1,0 +1,3 @@
+name: phase4_case_tests_for_health
+prompt: 'Generate pytest tests for the FastAPI app so that GET "/health" returns {"status":"ok"}.'
+

@@ -1,0 +1,22 @@
+safety:
+  max_command_time_seconds: 30
+  max_file_write_bytes: 5242880    # 5MB
+  max_patch_lines: 200
+  max_pip_install_packages: 10
+  blocked_commands:
+    - "rm -rf /"
+    - "sudo"
+    - "curl | bash"
+    - "wget | sh"
+  max_concurrent_processes: 3      # matches MAX_PARALLEL
+  docker_memory_limit: "512m"
+  docker_cpu_limit: "1.0"
+
+scheduler:
+  max_parallel: 3
+  max_queue_size: 10
+  memory_checkpoint_every_n_tasks: 5
+  circuit_breaker_max_retries: 5
+
+modes:
+  default: "research"              # research | auto | silent

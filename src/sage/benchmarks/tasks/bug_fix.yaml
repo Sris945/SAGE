@@ -1,0 +1,3 @@
+name: phase4_case_debug_missing_import
+prompt: "Fix the common FastAPI missing import issue so app.py imports FastAPI and the server can start."
+

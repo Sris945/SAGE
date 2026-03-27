@@ -1,0 +1,95 @@
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install package
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Ruff
+        run: |
+          ruff check src/sage tests
+          ruff format --check src/sage tests
+
+      - name: Mypy (new modules, skip heavy import graph)
+        run: |
+          mypy --follow-imports=skip \
+            src/sage/config/paths.py \
+            src/sage/execution/workspace_policy.py \
+            src/sage/execution/exceptions.py \
+            src/sage/execution/tool_policy.py \
+            src/sage/execution/verifier.py \
+            src/sage/llm/token_budget.py \
+            src/sage/observability/redaction.py \
+            src/sage/observability/structured_logger.py \
+            src/sage/prompt_engine/skill_injector.py \
+            src/sage/version.py \
+            src/sage/cli/exit_codes.py \
+            src/sage/cli/log_utils.py \
+            src/sage/cli/permissions_cmd.py \
+            src/sage/cli/run_cmd.py \
+            --ignore-missing-imports
+
+      - name: Run tests
+        run: |
+          python -m pytest tests/ -q
+
+      - name: Run local verification script
+        run: |
+          chmod +x scripts/verify_local.sh
+          scripts/verify_local.sh
+
+  # Real Ollama + real agent calls — release bar (not mocked).
+  live:
+    runs-on: ubuntu-latest
+    needs: tests
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install package
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Install Ollama
+        run: curl -fsSL https://ollama.com/install.sh | sh
+
+      - name: Start Ollama and pull model
+        run: |
+          nohup ollama serve > /tmp/ollama-ci.log 2>&1 &
+          for i in $(seq 1 45); do
+            curl -sSf http://127.0.0.1:11434/api/tags >/dev/null 2>&1 && break
+            sleep 1
+          done
+          ollama pull qwen2.5-coder:1.5b
+
+      - name: Live integration (real Ollama)
+        env:
+          SAGE_MODEL_PROFILE: test
+          SAGE_NON_INTERACTIVE: "1"
+        run: |
+          python -m pytest tests/integration -m ollama -v --tb=short
+          python -m sage.cli.main eval smoke

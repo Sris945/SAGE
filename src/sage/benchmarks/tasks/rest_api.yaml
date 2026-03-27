@@ -1,0 +1,3 @@
+name: phase4_case_fastapi_health
+prompt: 'Create app.py with a FastAPI app instance and a GET "/health" route returning {"status":"ok"}.'
+
