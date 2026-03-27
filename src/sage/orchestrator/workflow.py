@@ -1478,71 +1478,73 @@ def verification_gate(state: SAGEState) -> SAGEState:
             "fix_pattern_applied": False,
         }
 
-    # Ensure tests exist; if not, emit a PatchRequest and route through tool_executor.
+    # Ensure tests exist for Python implementation artifacts only (manifest tasks like
+    # requirements.txt are verified solely via task.verification — TestEngineer skips non-.py).
     from pathlib import Path
 
     emit_guard = dict(state.get("_test_emit_guard") or {})
     _emits = int(emit_guard.get(task.id, 0))
     test_file = str(Path("tests") / f"test_{Path(artifact_file).stem}.py")
     test_path = Path(test_file)
-    if not test_path.exists() or not test_path.read_text(errors="ignore").strip():
-        if _emits >= 4:
-            state["last_error"] = (
-                "Stopped after repeated test-generation attempts. "
-                "Inspect tests/ paths (avoid nested tests/tests/) and src layout."
+    if Path(artifact_file).suffix.lower() == ".py":
+        if not test_path.exists() or not test_path.read_text(errors="ignore").strip():
+            if _emits >= 4:
+                state["last_error"] = (
+                    "Stopped after repeated test-generation attempts. "
+                    "Inspect tests/ paths (avoid nested tests/tests/) and src layout."
+                )
+                return {
+                    **state,
+                    "task_dag": graph.to_dict(),
+                    "execution_result": {"status": "error", "file": artifact_file},
+                    "fix_pattern_hit": False,
+                    "fix_pattern_applied": False,
+                    "verification_passed": False,
+                    "verification_needs_tool_apply": False,
+                    "_test_emit_guard": emit_guard,
+                }
+            emit_guard[task.id] = _emits + 1
+            state["_test_emit_guard"] = emit_guard
+
+            test_prefix = build_prefix_for_agent(state, agent_role="test_engineer", task_id=task.id)
+            test_result = TestEngineerAgent().run(
+                source_file=artifact_file,
+                task={
+                    "id": task.id,
+                    "description": task.description,
+                    "task_complexity_score": task_complexity_score,
+                },
+                memory=state["session_memory"],
+                failure_count=int(task.retry_count),
+                universal_prefix=test_prefix,
+                insight_sink=state.get("insight_feed"),
             )
+
+            if test_result.get("status") != "patch_ready" or not test_result.get("patch_request"):
+                state["last_error"] = "TestEngineerAgent failed to generate patch_request."
+                return {
+                    **state,
+                    "task_dag": graph.to_dict(),
+                    "execution_result": {"status": "error", "file": artifact_file},
+                    "fix_pattern_hit": False,
+                    "fix_pattern_applied": False,
+                    "verification_passed": False,
+                    "verification_needs_tool_apply": False,
+                }
+
+            state["pending_patch_request"] = test_result["patch_request"]
+            state["pending_patch_source"] = "test_engineer"
+            state["pending_fix_pattern_context"] = {}
+            state["verification_passed"] = False
+            state["verification_needs_tool_apply"] = True
+            state["last_error"] = ""
             return {
                 **state,
                 "task_dag": graph.to_dict(),
-                "execution_result": {"status": "error", "file": artifact_file},
+                "execution_result": {"status": "ok", "file": artifact_file},
                 "fix_pattern_hit": False,
                 "fix_pattern_applied": False,
-                "verification_passed": False,
-                "verification_needs_tool_apply": False,
-                "_test_emit_guard": emit_guard,
             }
-        emit_guard[task.id] = _emits + 1
-        state["_test_emit_guard"] = emit_guard
-
-        test_prefix = build_prefix_for_agent(state, agent_role="test_engineer", task_id=task.id)
-        test_result = TestEngineerAgent().run(
-            source_file=artifact_file,
-            task={
-                "id": task.id,
-                "description": task.description,
-                "task_complexity_score": task_complexity_score,
-            },
-            memory=state["session_memory"],
-            failure_count=int(task.retry_count),
-            universal_prefix=test_prefix,
-            insight_sink=state.get("insight_feed"),
-        )
-
-        if test_result.get("status") != "patch_ready" or not test_result.get("patch_request"):
-            state["last_error"] = "TestEngineerAgent failed to generate patch_request."
-            return {
-                **state,
-                "task_dag": graph.to_dict(),
-                "execution_result": {"status": "error", "file": artifact_file},
-                "fix_pattern_hit": False,
-                "fix_pattern_applied": False,
-                "verification_passed": False,
-                "verification_needs_tool_apply": False,
-            }
-
-        state["pending_patch_request"] = test_result["patch_request"]
-        state["pending_patch_source"] = "test_engineer"
-        state["pending_fix_pattern_context"] = {}
-        state["verification_passed"] = False
-        state["verification_needs_tool_apply"] = True
-        state["last_error"] = ""
-        return {
-            **state,
-            "task_dag": graph.to_dict(),
-            "execution_result": {"status": "ok", "file": artifact_file},
-            "fix_pattern_hit": False,
-            "fix_pattern_applied": False,
-        }
 
     # Run verification command from the TaskNode.
     verify_cmd = task.verification

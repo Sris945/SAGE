@@ -213,6 +213,25 @@ class ReviewerAgent:
             )
             return ReviewResult(passed=False, score=0.0, verdict="FAIL", issues=goal_issues)
 
+        if _short_manifest_ok(str(path)):
+            # Small models often mis-read .txt manifests as "empty" in LLM review.
+            print_agent_line(
+                "Reviewer", "Dependency manifest — static + goal checks only (LLM skipped)."
+            )
+            _emit(
+                "observation",
+                severity="low",
+                content="Reviewer LLM skipped for known manifest filename.",
+            )
+            return ReviewResult(
+                passed=True,
+                score=1.0,
+                verdict="PASS",
+                issues=[],
+                suggestion="",
+                model_used="(manifest)",
+            )
+
         # ── LLM Review ────────────────────────────────────────────────────────
         model = self.router.select(
             "reviewer",
