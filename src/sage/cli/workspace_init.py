@@ -6,7 +6,8 @@ from pathlib import Path
 
 _DEFAULT_RULES = """# Project rules for SAGE
 
-# Optional: agent-specific files — `.sage/rules.planner.md`, `.sage/rules.coder.md`, …
+# Optional: agent-specific files — `.sage/rules.planner.md`, `.sage/rules.coder.md`,
+# `.sage/rules.documentation.md`, …
 # Global user rules may also live in `~/.sage/rules.md`.
 
 - Prefer small, reviewable changes.

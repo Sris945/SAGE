@@ -6,6 +6,13 @@ Environment (see also ``docs/TRUST_AND_SCALE.md``):
 - ``SAGE_FORCE_LOCAL_MODEL=<tag>`` — same, but set the tag explicitly.
 - ``SAGE_TRACE_ID`` — optional correlation id for structured JSON logs.
 - ``SAGE_NO_CLARIFY=1`` — skip interactive planner clarifying questions (same as ``--no-clarify``).
+
+Flags:
+
+- ``--fresh`` — do not resume from ``memory/handoff.json``.
+- ``--plan-only`` — print planner DAG and exit (no tools).
+- ``--dry-run`` — skip applying patches (verification may fail).
+- ``--include GLOB`` — repeatable scope hints for the planner.
 """
 
 from __future__ import annotations
@@ -32,8 +39,8 @@ def _print_run_header(*, mode: str, prompt: str, clarify: bool = True) -> None:
             cwd = "…" + cwd[-69:]
         flow = (
             "[muted]flow[/muted]  [brand_dim]planner[/brand_dim] [muted]→[/muted] "
-            "[brand_dim]code[/brand_dim] [muted]→[/muted] [brand_dim]review[/brand_dim] "
-            "[muted]→[/muted] [brand_dim]tests[/brand_dim] [muted]→[/muted] "
+            "[brand_dim]code[/brand_dim] [muted]·[/muted] [brand_dim]docs[/brand_dim] [muted]→[/muted] "
+            "[brand_dim]review[/brand_dim] [muted]→[/muted] [brand_dim]tests[/brand_dim] [muted]→[/muted] "
             "[brand_dim]verify[/brand_dim] [muted]→[/muted] [brand_dim]memory[/brand_dim]"
         )
         sep = "[muted]" + "─" * 42 + "[/muted]"
@@ -62,14 +69,66 @@ def _print_run_header(*, mode: str, prompt: str, clarify: bool = True) -> None:
         )
         c.print(Rule(style="rule", characters="─"))
         c.print()
+        try:
+            from sage.cli.branding import print_run_trust_strip
+
+            print_run_trust_strip()
+            c.print()
+        except Exception:
+            pass
     except Exception:
         print(f"\n[SAGE] v{get_version()} — starting (mode={mode})")
         print(f"[SAGE] Prompt: {prompt}\n")
 
 
-def cmd_run(args) -> None:
-    from sage.orchestrator.workflow import app
+def _print_run_summary(state: dict) -> None:
+    """Structured footer: DAG outcome, errors, handoff hint."""
+    from pathlib import Path
 
+    dag = state.get("task_dag") or {}
+    nodes = dag.get("nodes") or []
+    done = sum(1 for n in nodes if isinstance(n, dict) and n.get("status") == "completed")
+    failed = [n for n in nodes if isinstance(n, dict) and n.get("status") == "failed"]
+    blocked = sum(1 for n in nodes if isinstance(n, dict) and n.get("status") == "blocked")
+    err = (state.get("last_error") or "").strip()
+    handoff = Path("memory/handoff.json")
+
+    try:
+        from rich.panel import Panel
+
+        from sage.cli.branding import get_console
+
+        c = get_console()
+        bits = [
+            f"[muted]tasks[/muted] [brand]{done}[/brand] completed",
+            f"[muted]failed[/muted] [accent]{len(failed)}[/accent]",
+            f"[muted]blocked[/muted] {blocked}",
+        ]
+        if state.get("plan_only"):
+            bits.insert(0, "[accent]plan-only[/accent] — no execution")
+        if state.get("dry_run"):
+            bits.append("[accent]dry-run[/accent] — patches not applied")
+        foot = "  ·  ".join(bits)
+        if err:
+            foot += f"\n[accent]last error[/accent] [muted]{err[:560]}{'…' if len(err) > 560 else ''}[/muted]"
+        if handoff.is_file():
+            foot += f"\n[muted]handoff[/muted] {handoff.resolve()} [muted](next run resumes unless --fresh)[/muted]"
+        c.print()
+        c.print(Panel.fit(foot, title="[brand]run summary[/brand]", border_style="#0f766e"))
+        c.print()
+    except Exception:
+        print("\n[SAGE] run summary:")
+        print(f"  completed={done} failed={len(failed)} blocked={blocked}")
+        if err:
+            print(f"  last_error={err[:400]}")
+        if handoff.is_file():
+            print(f"  handoff={handoff}")
+
+
+def cmd_run(args) -> None:
+    from sage.orchestrator import workflow as wf
+
+    app = wf.app
     repo_path = args.repo or ""
     if repo_path:
         os.chdir(repo_path)
@@ -117,6 +176,10 @@ def cmd_run(args) -> None:
         "events": [],
         "mode": mode,
         "resume_from_handoff": False,
+        "skip_handoff": bool(getattr(args, "fresh", False)),
+        "plan_only": bool(getattr(args, "plan_only", False)),
+        "dry_run": bool(getattr(args, "dry_run", False)),
+        "cli_scope_globs": list(getattr(args, "include_globs", None) or []),
         "_test_emit_guard": {},
         "clarify": clarify,
     }
@@ -125,17 +188,34 @@ def cmd_run(args) -> None:
     if os.environ.get("SAGE_INSIDE_SHELL"):
         prev_shell_mode = os.environ.get("SAGE_SHELL_MODE")
         os.environ["SAGE_SHELL_MODE"] = "run"
+    last_tick = dict(initial_state)
     try:
-        app.invoke(initial_state)
+        if wf._HAS_LANGGRAPH:
+            for update in app.stream(initial_state, stream_mode="values"):
+                last_tick = update
+        else:
+            last_tick = app.invoke(initial_state)
+            sticky = getattr(app, "_last_graph_state", None)
+            if isinstance(sticky, dict):
+                last_tick = sticky
         if getattr(args, "explain_routing", False):
             print_routing_summary_for_session(new_session_id)
+        _print_run_summary(last_tick if isinstance(last_tick, dict) else {})
     except KeyboardInterrupt:
+        try:
+            from sage.orchestrator.handoff_payload import persist_interrupt_handoff
+
+            persist_interrupt_handoff(last_tick, reason="keyboard_interrupt")
+        except Exception:
+            pass
         try:
             from sage.cli.branding import get_console
 
-            get_console().print("  [muted]Interrupted — run stopped.[/muted]")
+            get_console().print(
+                "  [muted]Interrupted — handoff written to memory/handoff.json (if writable).[/muted]"
+            )
         except Exception:
-            print("\n[SAGE] Interrupted — run stopped.")
+            print("\n[SAGE] Interrupted — handoff saved when possible (memory/handoff.json).")
         if os.environ.get("SAGE_INSIDE_SHELL"):
             return
         raise SystemExit(130) from None

@@ -6,6 +6,7 @@ from pathlib import Path
 
 from sage.execution.tool_policy import format_tool_policy_summary
 from sage.memory.rag_retriever import format_patterns_for_prompt
+from sage.prompt_engine.rules_manager import load_merged_rules
 from sage.prompt_engine.universal_prefix import build_universal_prefix
 
 from sage.orchestrator.state import SAGEState
@@ -17,7 +18,7 @@ def allowed_tools_for_role(agent_role: str) -> list[str]:
     The workflow still enforces actual safety at execution time.
     """
     role = (agent_role or "").lower()
-    if role in ("coder", "debugger", "test_engineer"):
+    if role in ("coder", "debugger", "test_engineer", "documentation"):
         return ["create", "edit", "delete", "run_command"]
     return []
 
@@ -53,23 +54,7 @@ def build_prefix_for_agent(state: SAGEState, *, agent_role: str, task_id: str | 
     try:
         repo_root = state.get("repo_path") or ""
         base_dir = Path(repo_root).resolve() if repo_root else Path.cwd()
-
-        global_rules = Path.home() / ".sage" / "rules.md"
-        project_rules = base_dir / ".sage" / "rules.md"
-        agent_rules = base_dir / ".sage" / f"rules.{agent_role}.md"
-        legacy_project_rules = base_dir / ".sage-rules.md"
-
-        parts: list[str] = []
-        for p in (global_rules, project_rules, agent_rules, legacy_project_rules):
-            try:
-                if p.exists() and p.is_file():
-                    txt = p.read_text(errors="ignore").strip()
-                    if txt:
-                        parts.append(txt)
-            except OSError:
-                continue
-
-        user_rules_block = "\n\n".join(parts).strip()
+        user_rules_block = load_merged_rules(agent_role=agent_role, base_dir=base_dir)
     except Exception:
         user_rules_block = ""
 

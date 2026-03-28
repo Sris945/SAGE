@@ -45,6 +45,41 @@ def test_sage_slash_completer_tab_on_empty_line():
     assert "help" in texts or "/help" in texts
 
 
+def test_sage_slash_completer_subclasses_ptk_completer():
+    """Recent prompt_toolkit calls get_completions_async on the completer object."""
+    from prompt_toolkit.completion import Completer
+
+    from sage.cli.shell_input import _SageSlashCompleter, _completion_words_and_meta
+
+    words, meta = _completion_words_and_meta()
+    c = _SageSlashCompleter(words, meta)
+    assert isinstance(c, Completer)
+    assert hasattr(c, "get_completions_async")
+
+
+def test_completion_scroll_step_follows_menu_rows(monkeypatch):
+    from prompt_toolkit.layout.containers import Window
+    from prompt_toolkit.layout.layout import walk
+    from prompt_toolkit.layout.menus import CompletionsMenuControl
+
+    from sage.cli import shell_input as si
+
+    monkeypatch.setenv("SAGE_SHELL_MENU_ROWS", "20")
+    assert si._menu_rows_reserved() == 20
+    assert si._completion_scroll_page_step() == 19
+
+    s = si.create_shell_prompt_session(use_rich=False, minimal=True)
+    found = False
+    for node in walk(s.layout.container):
+        if isinstance(node, Window) and isinstance(
+            getattr(node, "content", None), CompletionsMenuControl
+        ):
+            assert node.height.max == 20
+            found = True
+            break
+    assert found
+
+
 def test_shell_input_simple_mode(monkeypatch):
     """read_shell_line uses plain input when SAGE_SHELL_SIMPLE_INPUT is set."""
     monkeypatch.setenv("SAGE_SHELL_SIMPLE_INPUT", "1")

@@ -21,6 +21,7 @@ ROUTER_ROLES = frozenset(
         "debugger",
         "reviewer",
         "test_engineer",
+        "documentation",
         "memory_optimizer",
     }
 )

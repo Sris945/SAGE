@@ -9,8 +9,10 @@ Usage:
   sage run "your prompt"        # run pipeline
   sage run "prompt" --auto      # no human checkpoints except circuit breaker
   sage run "prompt" --silent    # fully autonomous, skip failed tasks
+  sage run "goal" --plan-only   # DAG only; sage run --fresh ignores handoff
   sage status                   # show current session state
   sage memory                   # inspect memory layers
+  sage rules                    # show merged USER_RULES; sage rules validate
   sage permissions              # show policy; `permissions set …` persists in .sage/policy.json
   sage bench                    # run benchmark suite (Phase 4)
   sage bench --compare-policy   # static vs learned routing (Phase 5)
@@ -40,6 +42,7 @@ from sage.version import get_version
 from sage.cli.exit_codes import EX_USAGE
 from sage.cli.permissions_cmd import cmd_permissions
 from sage.cli.run_cmd import cmd_run
+from sage.cli.rules_cmd import cmd_rules, register_rules_parser
 
 
 def _write_bench_artifact(results: dict, out_arg: str | None) -> Path | None:
@@ -202,6 +205,8 @@ def _health_score_from_checks(checks: dict[str, dict]) -> dict:
         "ollama",
         "docker",
         "configured_models_present",
+        "prompt_toolkit",
+        "textual",
     ]
 
     critical_failed = [k for k in critical if not checks.get(k, {}).get("ok", False)]
@@ -326,6 +331,33 @@ def cmd_doctor(args) -> None:
         except Exception as e:
             checks["configured_models_present"] = {"ok": False, "detail": str(e)}
 
+    import importlib.metadata as im
+
+    try:
+        ptk_ver = im.version("prompt-toolkit")
+        checks["prompt_toolkit"] = {"ok": True, "detail": ptk_ver}
+    except Exception as e:
+        checks["prompt_toolkit"] = {
+            "ok": False,
+            "detail": {
+                "reason": str(e),
+                "fix_ptk": f"{sys.executable} -m pip install 'prompt_toolkit>=3.0.36'",
+                "alt_tui": f"{sys.executable} -m pip install 'textual>=0.58.0'  # then: sage tui",
+            },
+        }
+
+    try:
+        tu_ver = im.version("textual")
+        checks["textual"] = {"ok": True, "detail": tu_ver}
+    except Exception as e:
+        checks["textual"] = {
+            "ok": False,
+            "detail": {
+                "reason": str(e),
+                "fix": f"{sys.executable} -m pip install 'textual>=0.58.0'  # or: pip install 'sage[tui]'",
+            },
+        }
+
     # Health-style scoring summary.
     checks["health_summary"] = _health_score_from_checks(checks)
 
@@ -361,6 +393,8 @@ def cmd_doctor(args) -> None:
             if isinstance(detail, list):
                 for d in detail:
                     print(f"      * {d}")
+            elif isinstance(detail, dict):
+                print(f"      {json.dumps(detail, ensure_ascii=True)}")
             else:
                 print(f"      {str(detail)[:400]}")
     print("  - health_summary:")
@@ -381,6 +415,7 @@ def build_parser(*, exit_on_error: bool = True) -> argparse.ArgumentParser:
             '  sage run "your prompt" --auto        # planner may ask clarifying questions (TTY)\n'
             '  sage run "…" --auto --no-clarify     # skip planner Q&A for a fast run\n'
             "  sage shell                   # interactive (same as bare `sage` in a TTY)\n"
+            "  sage tui                     # full-screen Textual shell (optional extra)\n"
             "  sage session reset             # clear memory/system_state.json; new session id\n"
             "\n"
             "Bare `sage` in a terminal opens the interactive shell. "
@@ -424,6 +459,29 @@ def build_parser(*, exit_on_error: bool = True) -> argparse.ArgumentParser:
         action="store_true",
         help="After run, print a routing decision summary for this session.",
     )
+    run_p.add_argument(
+        "--fresh",
+        action="store_true",
+        help="Ignore memory/handoff.json for this run (no resume from interrupt snapshot).",
+    )
+    run_p.add_argument(
+        "--plan-only",
+        action="store_true",
+        help="Run planner (and checkpoints) then print the DAG and exit without tools/tests.",
+    )
+    run_p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Skip applying file patches (tools log TOOL_DRY_RUN); verification may fail.",
+    )
+    run_p.add_argument(
+        "--include",
+        action="append",
+        default=None,
+        metavar="GLOB",
+        dest="include_globs",
+        help="Scope hint for the planner (repeatable); e.g. src/**/*.py README.md",
+    )
 
     sub.add_parser("status", help="Show current session state")
     sub.add_parser(
@@ -431,6 +489,7 @@ def build_parser(*, exit_on_error: bool = True) -> argparse.ArgumentParser:
         help="Print the full command catalog (same as /commands in the interactive shell)",
     )
     sub.add_parser("memory", help="Inspect memory layers")
+    register_rules_parser(sub)
     perm_p = sub.add_parser(
         "permissions",
         help="Show or set workspace + tool policy (see `sage permissions set …`)",
@@ -467,6 +526,10 @@ def build_parser(*, exit_on_error: bool = True) -> argparse.ArgumentParser:
     )
     sub.add_parser(
         "shell", help="Interactive slash-command shell (default when bare `sage` in a TTY)"
+    )
+    sub.add_parser(
+        "tui",
+        help="Full-screen Textual UI (install: pip install 'sage[tui]' or textual)",
     )
 
     init_p = sub.add_parser(
@@ -675,6 +738,15 @@ def build_parser(*, exit_on_error: bool = True) -> argparse.ArgumentParser:
         "status",
         help="Show session state (alias of sage status)",
     )
+    session_handoff = session_sub.add_parser(
+        "handoff",
+        help="Show or clear interrupt handoff (memory/handoff.json)",
+    )
+    session_handoff.add_argument(
+        "--clear",
+        action="store_true",
+        help="Delete handoff file after displaying a short summary",
+    )
 
     return parser
 
@@ -688,6 +760,17 @@ def _dispatch_command_impl(args: argparse.Namespace, parser: argparse.ArgumentPa
             return
         cmd_shell(args)
         return
+    if args.command == "tui":
+        if os.environ.get("SAGE_INSIDE_SHELL"):
+            from sage.cli.branding import get_console
+
+            get_console().print(
+                "  [muted]Nested TUI disabled here. Exit the shell and run[/muted] [accent]sage tui[/accent] "
+                "[muted]from a fresh terminal.[/muted]"
+            )
+            return
+        cmd_tui(args)
+        return
     if args.command == "commands":
         from sage.cli.shell_support import print_commands_table
 
@@ -699,6 +782,8 @@ def _dispatch_command_impl(args: argparse.Namespace, parser: argparse.ArgumentPa
         cmd_status(args)
     elif args.command == "memory":
         cmd_memory(args)
+    elif args.command == "rules":
+        cmd_rules(args)
     elif args.command == "permissions":
         cmd_permissions(args)
     elif args.command == "bench":
@@ -792,7 +877,11 @@ def _dispatch_command_impl(args: argparse.Namespace, parser: argparse.ArgumentPa
     elif args.command == "prep":
         cmd_prep(args)
     elif args.command == "session":
-        from sage.cli.session_cmd import cmd_session_refresh, cmd_session_reset
+        from sage.cli.session_cmd import (
+            cmd_session_handoff,
+            cmd_session_refresh,
+            cmd_session_reset,
+        )
 
         sc = getattr(args, "session_command", None)
         if sc == "reset":
@@ -801,6 +890,8 @@ def _dispatch_command_impl(args: argparse.Namespace, parser: argparse.ArgumentPa
             cmd_session_refresh(args)
         elif sc == "status":
             cmd_status(args)
+        elif sc == "handoff":
+            cmd_session_handoff(args)
     elif args.command == "doctor":
         cmd_doctor(args)
     elif args.command == "config":
@@ -840,6 +931,12 @@ def dispatch_command(args: argparse.Namespace, parser: argparse.ArgumentParser) 
     return 0
 
 
+def cmd_tui(_args) -> None:
+    from sage.cli.tui_app import run_tui_shell
+
+    run_tui_shell()
+
+
 def cmd_shell(_args) -> None:
     """
     Interactive slash-like shell (in-process dispatch — fast, Rich errors).
@@ -866,34 +963,36 @@ def cmd_shell(_args) -> None:
     from sage.cli.shell_intent import ShellIntentKind, classify_shell_line_ex
     from sage.cli.shell_nl import run_shell_natural_language_goal, shell_natural_language_enabled
 
-    try:
-        from sage.cli.branding import print_shell_intro
+    from sage.cli.branding import print_shell_intro
 
-        print_shell_intro()
-        use_rich = True
-    except Exception:
-        print(
-            '[SAGE shell] Enter slash commands: /commands  /init  /doctor  /run "prompt" --auto  /exit to quit.'
-        )
-        use_rich = False
+    use_rich = print_shell_intro()
 
     os.environ["SAGE_INSIDE_SHELL"] = "1"
     os.environ.setdefault("SAGE_SHELL_MODE", "shell")
     os.environ.setdefault("SAGE_UI_MODE", "agent")
     parser = build_parser(exit_on_error=False)
 
-    # PromptSession (slash menu, completions) must not depend on Rich: if the banner fails,
-    # ``use_rich`` is False but we still want prompt_toolkit + ``/`` dropdown.
+    # PromptSession (slash menu) is independent of Rich; try full chrome then minimal (no toolbar/history file).
     shell_session = None
+    ptk_err: str | None = None
     if not os.environ.get("SAGE_SHELL_SIMPLE_INPUT", "").strip():
-        try:
-            from sage.cli.shell_input import create_shell_prompt_session
+        from sage.cli.shell_input import try_create_shell_prompt_session
 
-            shell_session = create_shell_prompt_session(use_rich=True)
-        except Exception as e:
-            if os.environ.get("SAGE_SHELL_DEBUG", "").strip():
-                print(f"[SAGE shell] debug  create_shell_prompt_session failed: {e!r}")
-            shell_session = None
+        shell_session, ptk_err = try_create_shell_prompt_session(use_rich=use_rich)
+        if shell_session is None and sys.stdin.isatty():
+            exe = sys.executable
+            print(
+                "\n[SAGE shell]  \033[1;33mNo slash dropdown\033[0m — input is plain text (no prompt_toolkit session).\n"
+                f"  Python: {exe}\n"
+                "  Fix:    pip install 'prompt_toolkit>=3.0.36'   (same environment as `sage`)\n"
+                "  Or:      sage tui   (full-screen UI; needs: pip install textual)\n"
+                "  Or run:  sage from your project .venv if dependencies are installed there.\n"
+                "  Opt-in plain REPL:  SAGE_SHELL_SIMPLE_INPUT=1\n"
+                "  Details:            SAGE_SHELL_DEBUG=1 sage shell\n",
+                file=sys.stderr,
+            )
+            if ptk_err:
+                print(f"  Last error: {ptk_err}\n", file=sys.stderr)
 
     if os.environ.get("SAGE_SHELL_DEBUG", "").strip():
         from sage.cli.shell_input import print_shell_input_diagnostics

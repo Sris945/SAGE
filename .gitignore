@@ -1,22 +1,52 @@
 # Python
 __pycache__/
 *.py[cod]
+*$py.class
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.tox/
 
 # Virtual env
 .venv/
 venv/
+.env
+.env.*
+!.env.example
 
-# Runtime/state artifacts (repo root only — do not ignore src/sage/memory/)
+# Build / packaging
+dist/
+build/
+*.egg
+wheelhouse/
+
+# Coverage / test artifacts
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+pytestdebug.log
+
+# Runtime/state at REPO ROOT only — safe to push without leaking local runs
+#
+# WHY `/memory/` (leading slash) and NOT `memory/` everywhere:
+# A bare `memory/` pattern ignores every path segment named `memory/` anywhere in the
+# tree — including the Python package `src/sage/memory/` (RAG, layers, code). That
+# would silently untrack production source. Root-only `/memory/` ignores the
+# generated workspace dir (`memory/system_state.json`, handoff, session logs, RL
+# artifacts, …) while leaving `src/sage/memory/` tracked.
+#
+# Why we do NOT commit that root `memory/` folder to GitHub: it is per-machine,
+# per-session state (not product source). It changes every run, may include paths,
+# prompts, and logs you do not want public or in PR noise.
 /memory/
+
 /datasets/
 bench*.json
 *_out.json
 *.log
 
-# Local experiment / scratch at repo root (not part of the package)
+# Local experiment / scratch at repo root (not the package)
 bench_out.txt
 
 # Large reference trees (not the SAGE product source)
@@ -26,10 +56,19 @@ simialr stuff/
 src/*.egg-info/
 *.egg-info/
 
-# Local planning drafts (optional) — do not ship draft spec trees
+# Local planning drafts (optional)
 plan v1/
 plan v2/
 plan final/
+
+# Local architecture spec / planning folder
+sage plan/
+
+# Staging dir for long docs (optional)
+.spec_staging/
+
+# SAGE per-project local UI (rules under `.sage/` are often committed; chats are not)
+.sage/chat_sessions/
 
 # IDE/editor
 .vscode/

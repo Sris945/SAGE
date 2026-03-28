@@ -1,5 +1,7 @@
 """Verification commands use the same policy as tool execution."""
 
+import sys
+
 import pytest
 
 from sage.execution.verifier import VerificationEngine, VerificationError
@@ -35,5 +37,7 @@ def test_verifier_pytest_gets_src_on_path(tmp_path):
         "import sys\nsys.path.insert(0, 'src')\nimport app\n\ndef test_f():\n    assert app.f() == 1\n",
         encoding="utf-8",
     )
-    r = VerificationEngine().run("python -m pytest tests/test_x.py -q", cwd=str(tmp_path))
+    r = VerificationEngine().run(
+        f"{sys.executable} -m pytest tests/test_x.py -q", cwd=str(tmp_path)
+    )
     assert r["passed"] is True

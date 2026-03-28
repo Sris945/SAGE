@@ -63,7 +63,7 @@ def _build_system_prompt(template: str, memory: dict, fix_patterns: list) -> str
     )
 
 
-_VALID_AGENTS = frozenset({"coder", "architect", "reviewer", "test_engineer"})
+_VALID_AGENTS = frozenset({"coder", "architect", "reviewer", "test_engineer", "documentation"})
 
 # Stronger than py_compile alone when the user asked for a real HTTP stack.
 _FASTAPI_APP_VERIFY = (
@@ -79,6 +79,24 @@ _REQ_FASTAPI_SNIPPET = (
     "t=p.read_text(errors='ignore').lower(); "
     "assert 'fastapi' in t and 'uvicorn' in t, 'need fastapi and uvicorn in requirements'\""
 )
+
+
+def _default_doc_verification(description: str) -> str:
+    """Portable check that a primary doc file exists and is non-trivial."""
+    d = (description or "").lower()
+    if "contributing" in d:
+        target = "CONTRIBUTING.md"
+    elif "changelog" in d:
+        target = "CHANGELOG.md"
+    else:
+        target = "README.md"
+    return (
+        "python -c \"from pathlib import Path; p=Path('%s'); "
+        "assert p.is_file(), 'missing %s'; "
+        "t=p.read_text(errors='ignore').strip(); "
+        "assert len(t)>40 and t.count(chr(10))>=1, '%s too thin'\""
+        % (target, target, target)
+    )
 
 
 def _fallback_verification_for_goal(goal: str) -> str:
@@ -110,6 +128,9 @@ def _postprocess_task_nodes(nodes: list[TaskNode], user_goal: str) -> list[TaskN
                 if "src/app.py" in v or "src/app.py" in desc_l:
                     if "&&" not in v:
                         nn = replace(nn, verification=_FASTAPI_APP_VERIFY)
+        if nn.assigned_agent == "documentation":
+            if not v or len(v.strip()) < 8:
+                nn = replace(nn, verification=_default_doc_verification(nn.description))
         out.append(nn)
     return out
 
@@ -131,13 +152,59 @@ def _normalize_assigned_agent(raw: object) -> str:
         "implementation": "coder",
         "implement": "coder",
         "review": "reviewer",
+        "docs": "documentation",
+        "doc": "documentation",
+        "documents": "documentation",
+        "documenter": "documentation",
+        "technical_writer": "documentation",
+        "tech_writer": "documentation",
     }
     s = aliases.get(s, s)
     if s in _VALID_AGENTS:
         return s
     if "test" in s and ("eng" in s or s.endswith("_tests")):
         return "test_engineer"
+    if "documentation" in s or s.endswith("_docs"):
+        return "documentation"
     return "coder"
+
+
+def _maybe_upgrade_to_documentation(description: str, agent: str) -> str:
+    if agent == "documentation" or agent == "test_engineer":
+        return agent
+    if agent not in ("coder", "reviewer", "architect"):
+        return agent
+    d = (description or "").lower()
+    if any(
+        k in d
+        for k in (
+            "pytest",
+            "unit test",
+            "unit tests",
+            "test file",
+            "add test",
+            "add tests",
+            "write test",
+            "write tests",
+            "tests/test",
+            "tests\\test",
+        )
+    ):
+        return agent
+    doc_hints = (
+        "readme",
+        "changelog",
+        "contributing",
+        "documentation",
+        "user guide",
+        " markdown ",
+        "docs/",
+        "doc/",
+        "api reference",
+    )
+    if any(h in d for h in doc_hints):
+        return "documentation"
+    return agent
 
 
 def _maybe_upgrade_to_test_engineer(description: str, agent: str) -> str:
@@ -217,6 +284,7 @@ def _validate_dag(dag_data: dict) -> list[TaskNode]:
         desc = str(n.get("description", "") or "")
         agent = _normalize_assigned_agent(n.get("assigned_agent", "coder"))
         agent = _maybe_upgrade_to_test_engineer(desc, agent)
+        agent = _maybe_upgrade_to_documentation(desc, agent)
         result.append(
             TaskNode(
                 id=n.get("id", f"task_{len(result):03d}"),

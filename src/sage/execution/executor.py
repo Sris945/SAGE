@@ -15,6 +15,7 @@ import threading
 from collections.abc import Sequence
 from pathlib import Path
 
+from sage.debug_mode_log import agent_debug_log
 from sage.execution.exceptions import SafetyViolation
 from sage.execution.tool_policy import DENY_SUBSTRINGS, check_run_command_policy, parse_command_argv
 from sage.execution.workspace_policy import default_workspace_roots, path_is_under_workspace
@@ -62,10 +63,24 @@ class ToolExecutionEngine:
         req.operation = op  # type: ignore[assignment]
         self._safety_check(req)
         if req.operation in ("edit", "create", "delete"):
-            return self._filesystem_handler(req)
+            out = self._filesystem_handler(req)
         elif req.operation == "run_command":
-            return self._terminal_handler(req)
-        raise ValueError(f"Unknown operation: {req.operation}")
+            out = self._terminal_handler(req)
+        else:
+            raise ValueError(f"Unknown operation: {req.operation}")
+        agent_debug_log(
+            hypothesis_id="H_exec",
+            location="executor.py:execute",
+            message="patch_executed",
+            data={
+                "operation": req.operation,
+                "file": str(req.file),
+                "status": out.get("status"),
+                "returncode": out.get("returncode"),
+                "patch_len": len(req.patch or ""),
+            },
+        )
+        return out
 
     def _safety_check(self, req: PatchRequest) -> None:
         if req.operation == "run_command":  # already normalised

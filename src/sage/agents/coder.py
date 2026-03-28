@@ -29,6 +29,7 @@ try:
 except ModuleNotFoundError:  # pragma: no cover
     ollama = None
 
+from sage.debug_mode_log import agent_debug_log
 from sage.agents.llm_parse import parse_patch_json
 from sage.cli.branding import print_agent_line
 from sage.orchestrator.model_router import ModelRouter
@@ -313,6 +314,16 @@ class CoderAgent:
             }
 
         print_agent_line("Coder", f"PatchRequest ready → {patch_req.file} ({patch_req.operation})")
+        agent_debug_log(
+            hypothesis_id="H_coder",
+            location="coder.py:patch_ready",
+            message="coder_patch_ready",
+            data={
+                "file": patch_req.file,
+                "operation": patch_req.operation,
+                "patch_len": len(patch_req.patch or ""),
+            },
+        )
         if patch_req.epistemic_flags:
             print_agent_line("Coder", f"Flags: {', '.join(patch_req.epistemic_flags)}")
 

@@ -32,6 +32,7 @@ ROUTER_ROLES: tuple[str, ...] = (
     "debugger",
     "reviewer",
     "test_engineer",
+    "documentation",
     "memory_optimizer",
 )
 

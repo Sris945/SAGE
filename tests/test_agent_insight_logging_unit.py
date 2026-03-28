@@ -35,13 +35,15 @@ class TestAgentInsightLogging(unittest.TestCase):
                 )
             )
 
-            self.assertEqual(log_event.call_count, 2)
+            self.assertEqual(log_event.call_count, 3)
 
             first_call = log_event.call_args_list[0]
             second_call = log_event.call_args_list[1]
+            third_call = log_event.call_args_list[2]
 
             self.assertEqual(first_call.args[0], "AGENT_INSIGHT_EMITTED")
             self.assertEqual(second_call.args[0], "AGENT_INSIGHT_EMITTED")
+            self.assertEqual(third_call.args[0], "ORCHESTRATOR_INTERVENTION")
 
             first_payload = first_call.kwargs["payload"]
             second_payload = second_call.kwargs["payload"]

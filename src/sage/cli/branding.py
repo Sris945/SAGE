@@ -70,38 +70,59 @@ def print_activation_footer() -> None:
     c.print()
 
 
-def print_shell_intro() -> None:
-    """Banner when entering interactive shell — compact; slash palette is the primary UX."""
-    from rich import box
-    from rich.panel import Panel
+def print_shell_intro() -> bool:
+    """
+    Banner when entering interactive shell — compact; slash palette is the primary UX.
 
-    print_banner(tagline=True)
-    c = get_console()
+    Never raises: falls back to ASCII lines if Rich/panel fails (e.g. broken TERM).
+    Returns True if the full Rich panel rendered.
+    """
     quick = (
         "[accent]/commands[/accent]  [muted]·[/muted]  [accent]/help[/accent]  [muted]·[/muted]  "
         "[accent]/skill[/accent]  [muted]·[/muted]  [accent]/model[/accent]  [muted]·[/muted]  "
         "[accent]/context[/accent]  [muted]·[/muted]  [accent]/clear[/accent]  [muted]·[/muted]  "
-        "[accent]/reset[/accent]  [muted]·[/muted]  [accent]/refresh[/accent]"
+        "[accent]/reset[/accent]  [muted]·[/muted]  [accent]/refresh[/accent]  [muted]·[/muted]  "
+        "[accent]session handoff[/accent]"
     )
-    c.print(
-        Panel(
-            f"[accent]Interactive shell[/accent]\n{quick}\n\n"
-            "[dim]────────────────────────────────────────────────────────────────[/dim]\n"
-            "[white bold]Type[/white bold] [accent]/[/accent] [white bold]— command menu[/white bold] "
-            "[muted](arrows + Enter).[/muted]  "
-            "[white bold]Or describe what to change in plain English[/white bold] [muted]— that is the "
-            "primary interface (same as[/muted] [accent]run[/accent][muted]; default NL uses research "
-            "checkpoints unless[/muted] [accent]SAGE_SHELL_NL_AUTO=1[/accent][muted]).[/muted]\n"
-            "[muted]No `sage` prefix;[/muted] [accent]/chat[/accent] [muted]— local Ollama chat; NL maps to pipeline or chat by intent.[/muted]  "
-            "[accent]run[/accent] [muted]·[/muted] [accent]--auto[/accent] [muted]·[/muted] "
-            "[accent]--no-clarify[/accent] [muted]·[/muted] [accent]--silent[/muted]",
-            title="[brand]SAGE[/brand] · shell",
-            border_style="#0d9488",
-            padding=(0, 1),
-            box=box.ROUNDED,
+    body = (
+        f"[accent]Interactive shell[/accent]\n{quick}\n\n"
+        "[dim]────────────────────────────────────────────────────────────────[/dim]\n"
+        "[white bold]Type[/white bold] [accent]/[/accent] [white bold]— command menu[/white bold] "
+        "[muted](arrows · Enter · Ctrl+Space).[/muted]  "
+        "[white bold]Or describe the change in plain English[/white bold] [muted](same as[/muted] "
+        "[accent]run[/accent][muted]).[/muted]\n"
+        "[muted]No `sage` prefix ·[/muted] [accent]/chat[/accent] [muted]local thread ·[/muted] "
+        "[accent]run[/accent] [muted]·[/muted] [accent]--auto[/accent] [muted]·[/muted] "
+        "[accent]--plan-only[/accent]"
+    )
+    try:
+        from rich import box
+        from rich.panel import Panel
+
+        print_banner(tagline=True)
+        c = get_console()
+        c.print(
+            Panel(
+                body,
+                title="[brand]SAGE[/brand] · shell",
+                border_style="#0d9488",
+                padding=(0, 1),
+                box=box.ROUNDED,
+            )
         )
-    )
-    c.print()
+        c.print()
+        return True
+    except Exception:
+        try:
+            print_banner(tagline=False)
+        except Exception:
+            print("SAGE shell")
+        print(
+            "  Type / for the command menu (needs prompt_toolkit). "
+            "/commands · /help · /run \"…\" --auto · /exit"
+        )
+        print()
+        return False
 
 
 def print_panel_title(text: str) -> None:
@@ -117,6 +138,27 @@ def print_agent_line(role: str, message: str) -> None:
         c.print(f"[accent]{escape(role)}[/accent] {escape(message)}")
     except Exception:
         print(f"\n[{role}] {message}")
+
+
+def print_run_trust_strip() -> None:
+    """One line: cwd + short tool policy (shown at start of ``sage run``)."""
+    from pathlib import Path
+
+    try:
+        from sage.execution.tool_policy import format_tool_policy_summary
+
+        c = get_console()
+        cwd = str(Path.cwd().resolve())
+        if len(cwd) > 72:
+            cwd = "…" + cwd[-69:]
+        pol = (format_tool_policy_summary() or "").replace("\n", " ").strip()
+        if len(pol) > 220:
+            pol = pol[:217] + "…"
+        c.print(f"  [muted]workspace[/muted] {cwd}")
+        if pol:
+            c.print(f"  [muted]policy[/muted] {pol}")
+    except Exception:
+        pass
 
 
 def print_run_task_header(task_id: str, description: str, attempt: int) -> None:

@@ -57,11 +57,62 @@ def _on_memory_checkpoint(event: Event) -> None:
     )
 
 
+def _on_orchestrator_intervention(event: Event) -> None:
+    """Structured log for intel-feed supervision (spec §11 / §12)."""
+    try:
+        from sage.observability.structured_logger import log_event
+
+        log_event(
+            "ORCHESTRATOR_INTERVENTION",
+            payload=dict(event.payload or {}),
+            timestamp=event.timestamp,
+        )
+    except Exception:
+        pass
+
+
 EVENT_BUS.subscribe("TASK_COMPLETED", _on_task_completed)
 EVENT_BUS.subscribe("MEMORY_CHECKPOINT", _on_memory_checkpoint)
+EVENT_BUS.subscribe("ORCHESTRATOR_INTERVENTION", _on_orchestrator_intervention)
 
 
 # ── Node stubs (Phase 1: sequential pipeline only) ───────────────────────────
+
+
+def _git_worktree_snapshot(repo_path: str, *, max_chars: int = 4200) -> str:
+    """Short git status + diff stat for planner context (best-effort)."""
+    from pathlib import Path
+    import subprocess
+
+    root = Path(repo_path).resolve()
+    if not (root / ".git").is_dir():
+        return ""
+    try:
+        st = subprocess.run(
+            ["git", "-C", str(root), "status", "--short"],
+            capture_output=True,
+            text=True,
+            timeout=8,
+            check=False,
+        )
+        diff = subprocess.run(
+            ["git", "-C", str(root), "diff", "--stat", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=12,
+            check=False,
+        )
+        parts: list[str] = []
+        if st.stdout and st.stdout.strip():
+            parts.append("git status --short:\n" + st.stdout.strip())
+        if diff.stdout and diff.stdout.strip():
+            parts.append("git diff --stat HEAD:\n" + diff.stdout.strip())
+        out = "\n\n".join(parts).strip()
+        if len(out) > max_chars:
+            out = out[: max_chars - 24].rstrip() + "\n… (truncated)"
+        return out
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return ""
 
 
 def load_memory(state: SAGEState) -> SAGEState:
@@ -76,7 +127,8 @@ def load_memory(state: SAGEState) -> SAGEState:
     from sage.orchestrator.intelligence_feed import OrchestratorIntelligenceFeed
 
     sm = SessionManager()
-    handoff = sm.check_handoff()
+    skip_handoff = bool(state.get("skip_handoff"))
+    handoff = None if skip_handoff else sm.check_handoff()
     mm = MemoryManager()
     session_memory = mm.load_state()
 
@@ -85,15 +137,25 @@ def load_memory(state: SAGEState) -> SAGEState:
     if sage_memory_summary:
         session_memory["sage_memory_summary"] = sage_memory_summary
 
-    return {
+    feed = OrchestratorIntelligenceFeed()
+    out: SAGEState = {
         **state,
         "session_memory": session_memory,
-        "insight_feed": OrchestratorIntelligenceFeed(),
+        "insight_feed": feed,
         "architect_blueprints_by_task": state.get("architect_blueprints_by_task", {}),
         "task_updates": [],
         "resume_from_handoff": handoff is not None,
         "events": [],
     }
+    if handoff:
+        from sage.orchestrator.handoff_payload import (
+            apply_handoff_to_state,
+            rehydrate_insights_into_feed,
+        )
+
+        out = apply_handoff_to_state(out, handoff)
+        rehydrate_insights_into_feed(feed, handoff.get("insight_snapshot") or [])
+    return out
 
 
 def prompt_middleware(state: SAGEState) -> SAGEState:
@@ -283,8 +345,17 @@ def run_planner(state: SAGEState) -> SAGEState:
         clarify_flag=clarify_flag,
         no_clarify_env=no_env,
     )
+    prompt_in = state["enhanced_prompt"] or state["user_prompt"]
+    globs = [str(x).strip() for x in (state.get("cli_scope_globs") or []) if str(x).strip()]
+    if globs:
+        prompt_in = (
+            prompt_in
+            + "\n\n[CLI file scope — prioritize and constrain edits to these paths when possible:]\n"
+            + "\n".join(f"- {g}" for g in globs)
+        )
+
     nodes = agent.run(
-        prompt=state["enhanced_prompt"] or state["user_prompt"],
+        prompt=prompt_in,
         memory=state["session_memory"],
         mode=mode,
         fix_patterns=state.get("retrieved_fix_patterns") or [],
@@ -527,6 +598,9 @@ def codebase_intel(state: SAGEState) -> SAGEState:
     brief = build_codebase_brief(repo_path)
     session_memory = state.get("session_memory", {})
     session_memory["codebase_brief"] = brief
+    snap = _git_worktree_snapshot(repo_path)
+    if snap:
+        session_memory["git_worktree_snapshot"] = snap
     return {**state, "session_memory": session_memory}
 
 
@@ -884,14 +958,16 @@ def execute_agent(state: SAGEState) -> SAGEState:
 
     This node only performs agent-role work:
       - `coder`: emits `pending_patch_request`
+      - `documentation`: emits markdown `PatchRequest` for README/docs tasks
       - `test_engineer`: emits test `PatchRequest` from dependency artifacts
       - `architect`: marks task completed via blueprint side-effects
       - `reviewer`: produces no patch; verification runs in `verification_gate`
     """
     from pathlib import Path
 
-    from sage.agents.coder import CoderAgent
     from sage.agents.architect import ArchitectAgent
+    from sage.agents.coder import CoderAgent
+    from sage.agents.documentation import DocumentationAgent
     from sage.agents.test_engineer import TestEngineerAgent
 
     graph = _rebuild_task_graph(state.get("task_dag", {}))
@@ -1019,6 +1095,56 @@ def execute_agent(state: SAGEState) -> SAGEState:
             "task_dag": graph.to_dict(),
             "current_task": vars(task),
             "execution_result": {"status": "ok", "file": coder_result.get("file", "")},
+            "last_error": "",
+            "fix_pattern_hit": False,
+            "fix_pattern_applied": False,
+            "pending_patch_request": pending_patch_request,
+            "pending_patch_source": pending_patch_source,
+            "pending_fix_pattern_context": pending_fix_pattern_context,
+        }
+
+    if task.assigned_agent == "documentation":
+        universal_prefix = build_prefix_for_agent(state, agent_role="documentation", task_id=task.id)
+        task_complexity_score = float(getattr(task, "task_complexity_score", 0.0) or 0.0)
+        doc_result = DocumentationAgent().run(
+            task={
+                "id": task.id,
+                "description": task.description,
+                "task_complexity_score": task_complexity_score,
+            },
+            memory=state["session_memory"],
+            failure_count=attempt,
+            universal_prefix=universal_prefix,
+            insight_sink=insight_sink,
+        )
+
+        if doc_result.get("status") != "patch_ready":
+            error = doc_result.get("error") or doc_result.get("reason") or "documentation failed"
+            task.status = "failed"
+            state["last_error"] = str(error)
+            return {
+                **state,
+                "task_dag": graph.to_dict(),
+                "current_task": vars(task),
+                "execution_result": {"status": "error", "file": doc_result.get("file", "")},
+                "fix_pattern_hit": False,
+                "fix_pattern_applied": False,
+                "pending_patch_request": pending_patch_request,
+                "pending_patch_source": pending_patch_source,
+                "pending_fix_pattern_context": pending_fix_pattern_context,
+            }
+
+        pending_patch_request = doc_result.get("patch_request") or {}
+        pending_patch_source = "documentation"
+        task.model_used = doc_result.get("model_used", "") or ""
+        task.strategy_key = doc_result.get("strategy_key", "") or ""
+        task.status = "running"
+
+        return {
+            **state,
+            "task_dag": graph.to_dict(),
+            "current_task": vars(task),
+            "execution_result": {"status": "ok", "file": doc_result.get("file", "")},
             "last_error": "",
             "fix_pattern_hit": False,
             "fix_pattern_applied": False,
@@ -1205,6 +1331,36 @@ def tool_executor(state: SAGEState) -> SAGEState:
                 "error": str(e),
             },
             "last_error": str(e),
+        }
+
+    if bool(state.get("dry_run")):
+        try:
+            from sage.observability.structured_logger import log_event
+
+            log_event(
+                "TOOL_DRY_RUN",
+                payload={
+                    "task_id": getattr(task, "id", ""),
+                    "operation": patch_req.operation,
+                    "file": patch_req.file,
+                },
+            )
+        except Exception:
+            pass
+        return {
+            **state,
+            "task_dag": graph.to_dict(),
+            "execution_result": {
+                "status": "ok",
+                "operation": patch_req.operation,
+                "file": patch_req.file,
+                "dry_run": True,
+            },
+            "pending_patch_request": {},
+            "pending_patch_source": "",
+            "pending_fix_pattern_context": {},
+            "verification_needs_tool_apply": False,
+            "last_error": "",
         }
 
     # Human Checkpoint 4 — Pre-deploy.
@@ -1964,6 +2120,64 @@ def circuit_breaker(state: SAGEState) -> SAGEState:
     }
 
 
+def finalize_plan_only(state: SAGEState) -> SAGEState:
+    """
+    CLI ``--plan-only``: show the planner DAG and persist ``.sage/last_plan.json``;
+    does not run workers, ``tool_executor``, or ``save_memory``.
+    """
+    import json
+    from pathlib import Path
+
+    dag = state.get("task_dag") or {}
+    base = Path(state.get("repo_path") or ".").resolve()
+    plan_path = base / ".sage" / "last_plan.json"
+    wrote: Path | None = None
+    try:
+        plan_path.parent.mkdir(parents=True, exist_ok=True)
+        plan_path.write_text(json.dumps(dag, indent=2), encoding="utf-8")
+        wrote = plan_path
+    except OSError:
+        pass
+
+    try:
+        from rich import box
+        from rich.panel import Panel
+        from rich.table import Table
+
+        from sage.cli.branding import get_console
+
+        c = get_console()
+        rows = dag.get("nodes") or []
+        tbl = Table(
+            title="[accent]Plan only[/accent] — no tools will run",
+            box=box.ROUNDED,
+            border_style="#0f766e",
+            header_style="accent",
+        )
+        tbl.add_column("ID", style="brand", no_wrap=True)
+        tbl.add_column("Agent", style="accent", no_wrap=True)
+        tbl.add_column("Task", style="white")
+        for node in rows:
+            if not isinstance(node, dict):
+                continue
+            tbl.add_row(
+                str(node.get("id", "")),
+                str(node.get("assigned_agent", "")),
+                str(node.get("description", ""))[:160],
+            )
+        sub = f"[muted]{wrote}[/muted]" if wrote else None
+        c.print()
+        c.print(Panel(tbl, subtitle=sub, border_style="#0d9488", padding=(0, 1)))
+        c.print()
+    except Exception:
+        print("\n[SAGE] plan-only — task DAG:")
+        print(json.dumps(dag, indent=2))
+        if wrote:
+            print(f"[SAGE] Wrote {wrote}")
+
+    return state
+
+
 def save_memory(state: SAGEState) -> SAGEState:
     """
     SessionEnd hook.
@@ -2024,6 +2238,7 @@ def build_workflow():
     workflow.add_node("route_model", route_model)
     workflow.add_node("planner", run_planner)
     workflow.add_node("human_checkpoint", human_checkpoint)
+    workflow.add_node("finalize_plan_only", finalize_plan_only)
 
     workflow.add_node("scheduler_batch", scheduler_batch)
     workflow.add_node("parallel_dispatch", parallel_dispatch)
@@ -2051,7 +2266,19 @@ def build_workflow():
     workflow.add_edge("human_checkpoint_1_post_scan", "prompt_middleware")
     workflow.add_edge("prompt_middleware", "route_model")
     workflow.add_edge("route_model", "planner")
-    workflow.add_edge("planner", "human_checkpoint")
+
+    def _route_after_planner(s: SAGEState):
+        return "finalize_plan_only" if s.get("plan_only") else "human_checkpoint"
+
+    workflow.add_conditional_edges(
+        "planner",
+        _route_after_planner,
+        {
+            "finalize_plan_only": "finalize_plan_only",
+            "human_checkpoint": "human_checkpoint",
+        },
+    )
+    workflow.add_edge("finalize_plan_only", END)
     workflow.add_edge("human_checkpoint", "scheduler_batch")
 
     # If the orchestrator flagged high-risk tasks in research mode, pause again.
@@ -2143,21 +2370,39 @@ else:  # pragma: no cover
         execution remains safe via the in-process file locks.
         """
 
+        def __init__(self) -> None:
+            self._last_graph_state: dict | None = None
+
+        def stream(self, state: SAGEState, stream_mode: str = "values", **kwargs: object):
+            """Yield the same full-state snapshots LangGraph uses (single-consumer)."""
+            if stream_mode != "values":
+                yield self.invoke(state)
+                return
+            yield self.invoke(state)
+
         def invoke(self, state: SAGEState):
+            import copy
+
             from concurrent.futures import ThreadPoolExecutor, as_completed
             from sage.orchestrator.task_scheduler import MAX_PARALLEL
 
             s = dict(state)
             s = load_memory(s)
+            self._last_graph_state = copy.deepcopy(dict(s))
             s = detect_mode(s)
             if s.get("repo_mode") == "existing_repo":
                 s = codebase_intel(s)
             s = prompt_middleware(s)
             s = route_model(s)
             s = run_planner(s)
+            if s.get("plan_only"):
+                s = finalize_plan_only(s)
+                self._last_graph_state = copy.deepcopy(dict(s))
+                return s
             s = human_checkpoint(s)
 
             while True:
+                self._last_graph_state = copy.deepcopy(dict(s))
                 graph = _rebuild_task_graph(s.get("task_dag", {}))
                 if graph.all_done():
                     return save_memory(s)

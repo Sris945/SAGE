@@ -145,8 +145,15 @@ def _select_skills(
         )
     if role in ("reviewer", "test_engineer"):
         specs.append(_SkillSpec("workflow/verification-loop/SKILL.md"))
-    if role in ("planner", "coder", "debugger"):
+    if role in ("planner", "coder", "debugger", "documentation"):
         specs.append(_SkillSpec("workflow/documentation-lookup/SKILL.md"))
+    if role == "documentation":
+        specs.extend(
+            [
+                _SkillSpec("discipline/verification-before-completion/SKILL.md"),
+                _SkillSpec("workflow/prompt-optimizer/SKILL.md"),
+            ]
+        )
 
     if role == "planner":
         specs.append(_SkillSpec("planning/make-plan/SKILL.md"))

@@ -13,11 +13,12 @@ def test_bottom_toolbar_includes_policy_and_session(monkeypatch, tmp_path) -> No
     ft = format_shell_bottom_toolbar()
     text = "".join(fragment[1] for fragment in ft)
 
-    assert "standard" in text
+    assert "std" in text
     assert "abcd1234" in text
     assert "fresh" in text
     assert "ui" in text
-    assert "permissions" in text
+    assert "policy" in text or "std" in text
+    assert "\n" not in text
 
 
 def test_bottom_toolbar_saved_when_state_exists(monkeypatch, tmp_path) -> None:
@@ -30,4 +31,4 @@ def test_bottom_toolbar_saved_when_state_exists(monkeypatch, tmp_path) -> None:
     text = "".join(fragment[1] for fragment in ft)
 
     assert "saved" in text
-    assert "none" in text  # session id
+    assert "sess —" in text or "—" in text  # no session id

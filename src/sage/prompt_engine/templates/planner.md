@@ -19,7 +19,8 @@ RULES (product-grade / “IDE assistant” bar):
     `verification`: `pytest tests/test_app.py -q`
 - If the repo is **not** Python, adapt the dependency + implementation + test pattern to that ecosystem; still keep **dependency manifest → implementation → tests → verify**.
 - **verification**: one shell-safe command per task. You may chain checks with **` && `** (space-ampersand-space) when both steps are needed. Use only `python`, `python -m`, `pytest`, etc. — no shell pipes, no `sudo`, no downloads.
-- **assigned_agent** must be exactly ONE of: coder, architect, reviewer, test_engineer
+- **assigned_agent** must be exactly ONE of: coder, architect, reviewer, test_engineer, documentation
+- For **documentation-only** work (README, CONTRIBUTING, CHANGELOG, user guides, `docs/*.md`): use **documentation** and a **verification** command that asserts the target file exists with substance (e.g. `python -c "from pathlib import Path; p=Path('README.md'); assert p.is_file() and len(p.read_text(errors='ignore').strip())>40"` — adjust the path to match the task).
 - **dependencies**: list of task IDs that must complete first (use `[]` if none)
 - **brainstorm_questions**: 0–4 short questions **only** if the goal is genuinely ambiguous. If you can plan confidently, use `[]` and set **confirmed** `true`.
 - **confirmed**: boolean — `true` if the goal is clear enough to build a DAG without user input

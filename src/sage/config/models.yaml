@@ -40,6 +40,12 @@ routing:
     fallback_triggers:
       - primary_failure_count >= 2
 
+  documentation:
+    primary: "qwen2.5-coder:1.5b"
+    fallback: "qwen2.5-coder:14b-instruct-q4_K_M"
+    fallback_triggers:
+      - primary_failure_count >= 2
+
   memory_optimizer:
     primary: "qwen3:14b-q4_K_M"
     fallback: "claude-sonnet-4-5"

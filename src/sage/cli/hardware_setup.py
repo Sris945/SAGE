@@ -248,7 +248,7 @@ def suggest_ollama_stack(
     if tier == "conservative":
         tier = "minimal"
 
-    # Role-specific mapping (planner/architect/coder/reviewer/test_engineer/debugger/memory_optimizer)
+    # Role-specific mapping (planner/architect/coder/reviewer/test_engineer/documentation/debugger/memory_optimizer)
     routing: dict[str, dict[str, str | list]] = {}
 
     if tier == "minimal":
@@ -294,6 +294,11 @@ def suggest_ollama_stack(
                 "fallback": tiny_fallback,
                 "fallback_triggers": ["primary_failure_count >= 2"],
             },
+            "documentation": {
+                "primary": tiny_primary,
+                "fallback": tiny_fallback,
+                "fallback_triggers": ["primary_failure_count >= 2"],
+            },
             "debugger": {
                 "primary": tiny_primary,
                 "fallback": tiny_fallback,
@@ -333,6 +338,11 @@ def suggest_ollama_stack(
                 "fallback": tiny_fallback,
                 "fallback_triggers": ["primary_failure_count >= 2"],
             },
+            "documentation": {
+                "primary": tiny_primary,
+                "fallback": tiny_fallback,
+                "fallback_triggers": ["primary_failure_count >= 2"],
+            },
             "debugger": {
                 "primary": tiny_fallback,
                 "fallback": med,
@@ -368,6 +378,11 @@ def suggest_ollama_stack(
                 "fallback_triggers": ["primary_failure_count >= 2"],
             },
             "test_engineer": {
+                "primary": tiny_primary,
+                "fallback": tiny_fallback,
+                "fallback_triggers": ["primary_failure_count >= 2"],
+            },
+            "documentation": {
                 "primary": tiny_primary,
                 "fallback": tiny_fallback,
                 "fallback_triggers": ["primary_failure_count >= 2"],

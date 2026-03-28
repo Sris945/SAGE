@@ -25,7 +25,43 @@ class OrchestratorIntelligenceFeed:
 
     insights: list[AgentInsight] = field(default_factory=list)
     interventions: list[dict] = field(default_factory=list)
+    _unclear_escalated_task_ids: set[str] = field(default_factory=set, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, init=False)
+
+    def _unclear_signal_count(self, task_id: str) -> int:
+        n = 0
+        for ins in self.insights:
+            if getattr(ins, "task_id", "") != task_id:
+                continue
+            flag = (getattr(ins, "epistemic_flag", "") or "").upper()
+            if "UNCLEAR" in flag:
+                n += 1
+                continue
+            if getattr(ins, "insight_type", "") == "uncertainty":
+                n += 1
+        return n
+
+    def _emit_intervention_event(self, insight: AgentInsight, *, cause: str) -> None:
+        try:
+            from sage.orchestrator.workflow import EVENT_BUS
+            from sage.protocol.schemas import Event
+
+            EVENT_BUS.emit_sync(
+                Event(
+                    type="ORCHESTRATOR_INTERVENTION",
+                    task_id=insight.task_id,
+                    payload={
+                        "cause": cause,
+                        "agent": insight.agent,
+                        "severity": insight.severity,
+                        "requires_orchestrator_action": insight.requires_orchestrator_action,
+                        "content_preview": (insight.content or "")[:500],
+                    },
+                    timestamp=datetime.now(timezone.utc).isoformat(),
+                )
+            )
+        except Exception:
+            return
 
     def ingest(self, insight: AgentInsight) -> None:
         """Ingest an insight packet and decide whether to intervene (MVP = log-only)."""
@@ -35,6 +71,27 @@ class OrchestratorIntelligenceFeed:
                 insight.timestamp = datetime.now(timezone.utc).isoformat()
 
             self.insights.append(insight)
+
+            # Spec §11: escalate after repeated UNCLEAR / uncertainty on the same task.
+            tid = str(insight.task_id or "")
+            if tid and self._unclear_signal_count(tid) >= self.uncertainty_count:
+                if tid not in self._unclear_escalated_task_ids:
+                    self._unclear_escalated_task_ids.add(tid)
+                    self.interventions.append(
+                        {
+                            "task_id": tid,
+                            "agent": "orchestrator",
+                            "severity": "high",
+                            "insight_type": "unclear_threshold",
+                            "content": (
+                                f"Task {tid}: {self.uncertainty_count}+ uncertainty/UNCLEAR signals "
+                                "— escalate to human checkpoint in research/auto modes."
+                            ),
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "requires_orchestrator_action": True,
+                        }
+                    )
+                    self._emit_intervention_event(insight, cause="unclear_threshold")
 
             # Phase 3 contract: emit a log entry for every ingested packet.
             # Observability must be best-effort and never break orchestration.
@@ -71,6 +128,8 @@ class OrchestratorIntelligenceFeed:
                         "requires_orchestrator_action": insight.requires_orchestrator_action,
                     }
                 )
+                if insight.severity == "high" or insight.requires_orchestrator_action:
+                    self._emit_intervention_event(insight, cause="agent_insight")
 
     def get_injected_context(self, task_id: str, *, next_agent: str | None = None) -> str:
         """

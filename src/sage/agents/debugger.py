@@ -33,6 +33,7 @@ except ModuleNotFoundError:  # pragma: no cover
     ollama = None
 
 from sage.agents.llm_parse import parse_patch_json
+from sage.debug_mode_log import agent_debug_log
 from sage.cli.branding import print_agent_line
 from sage.orchestrator.model_router import ModelRouter
 from sage.protocol.schemas import PatchRequest
@@ -183,6 +184,17 @@ class DebuggerAgent:
                 )
             except Exception:
                 return
+
+        agent_debug_log(
+            hypothesis_id="H_debugger",
+            location="debugger.py:run",
+            message="debugger_invoked",
+            data={
+                "task_id": str(task.get("id", "")),
+                "failed_file": failed_file,
+                "error_head": (error or "")[:500],
+            },
+        )
 
         model = self.router.select(
             "debugger",

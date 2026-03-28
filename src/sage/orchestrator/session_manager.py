@@ -52,6 +52,25 @@ class SessionManager:
         with open(HANDOFF_PATH, "w") as f:
             json.dump(handoff, f, indent=2)
 
+    def write_interrupt_handoff(
+        self,
+        *,
+        reason: str,
+        state_snapshot: dict,
+        insight_snapshot: list[dict],
+    ) -> None:
+        """Persist rich resume payload (keyboard interrupt, unknown errors, etc.)."""
+        payload = {
+            "schema_version": 1,
+            "interrupted_at": datetime.now(timezone.utc).isoformat(),
+            "reason": reason,
+            "state_snapshot": state_snapshot,
+            "insight_snapshot": insight_snapshot,
+        }
+        HANDOFF_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with open(HANDOFF_PATH, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+
     def clear_handoff(self) -> None:
         """Called on clean SESSION_END."""
         if HANDOFF_PATH.exists():

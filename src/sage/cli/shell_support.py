@@ -15,6 +15,22 @@ from sage.config.paths import resolved_models_yaml_path
 from sage.version import get_version
 
 
+def _shell_output_pager_context():
+    """
+    Scroll long `/commands` and `/help` in ``less`` (or system pager) when stdout is a TTY.
+
+    Disable with ``SAGE_SHELL_NO_PAGER=1``.
+    """
+    import sys
+    from contextlib import nullcontext
+
+    from sage.cli.branding import get_console
+
+    if not sys.stdout.isatty() or os.environ.get("SAGE_SHELL_NO_PAGER", "").strip():
+        return nullcontext()
+    return get_console().pager(styles=True, links=True)
+
+
 @dataclass(frozen=True)
 class CommandRow:
     name: str
@@ -55,6 +71,11 @@ COMMAND_CATALOG: tuple[CommandRow, ...] = (
     CommandRow("status", "Last session state (memory/system_state.json)", "status"),
     CommandRow("memory", "List memory layer files", "memory"),
     CommandRow(
+        "rules",
+        "Merged USER_RULES (~/.sage + .sage) or validate",
+        "rules  |  rules validate --strict",
+    ),
+    CommandRow(
         "permissions",
         "Show/set policy ( .sage/policy.json )",
         "permissions  |  permissions set policy strict",
@@ -71,8 +92,8 @@ COMMAND_CATALOG: tuple[CommandRow, ...] = (
     CommandRow("shell", "This REPL (also: bare `sage` in a TTY)", "shell"),
     CommandRow(
         "session",
-        "reset | refresh | status — session bookkeeping",
-        "session reset",
+        "reset | refresh | status | handoff — state + interrupt snapshot",
+        "session handoff  |  session handoff --clear",
     ),
 )
 
@@ -101,7 +122,7 @@ SHELL_BUILTIN_COMMANDS: frozenset[str] = frozenset(
 
 # First token must be one of these to use CLI argparse; otherwise the line is treated as a natural-language goal (pipeline).
 SHELL_TOP_LEVEL_COMMANDS: frozenset[str] = frozenset(
-    "run status commands memory permissions shell init setup doctor config bench rl sim cron eval prep session".split()
+    "run status commands memory rules permissions shell init setup doctor config bench rl sim cron eval prep session".split()
 )
 
 
@@ -186,7 +207,8 @@ def print_shell_chat_stub() -> None:
     c.print()
 
 
-def print_commands_table() -> None:
+def _print_commands_table_content() -> None:
+    """Table + shell-only hints + doc links (no pager wrapper)."""
     from rich import box
     from rich.table import Table
 
@@ -221,6 +243,11 @@ def print_commands_table() -> None:
     print_docs_links_footer()
 
 
+def print_commands_table() -> None:
+    with _shell_output_pager_context():
+        _print_commands_table_content()
+
+
 def print_shell_help_screen() -> None:
     from rich.panel import Panel
 
@@ -243,36 +270,42 @@ def print_shell_help_screen() -> None:
         "[accent]/chat[/accent] [muted]·[/muted] [accent]start chat[/accent] [muted]— local LLM thread; transcript attaches to the next[/muted] [accent]run[/accent]\n"
         "[accent]/agent[/accent] [muted]— agent/build mode reminder;[/muted] [accent]agent clear[/accent] [muted]drops attach context[/muted]\n"
         "\n"
-        "[accent]/[/accent] [muted]opens the command menu immediately[/muted] (arrow keys + Enter). "
-        "[muted]Tab also works on an empty line.[/muted]\n"
+        "[accent]/[/accent] [muted]opens the completion menu[/muted] (arrow keys + Enter). "
+        "[accent]Ctrl+Space[/accent] [muted]forces the menu (e.g. after[/muted] [muted]SAGE_SHELL_HISTORY_SEARCH=1[/muted]"
+        "[muted]).[/muted] [muted]Tab[/muted] on an empty line lists tokens.\n"
         "\n"
         "[muted]Pipeline flags (after[/muted] [accent]run[/accent][muted]):[/muted] "
-        "[accent]--auto[/accent]  [accent]--no-clarify[/accent]  [accent]--silent[/accent]  [accent]--repo PATH[/accent]\n"
+        "[accent]--auto[/accent]  [accent]--no-clarify[/accent]  [accent]--silent[/accent]  [accent]--repo PATH[/accent]  "
+        "[accent]--fresh[/accent]  [accent]--plan-only[/accent]  [accent]--dry-run[/accent]  [accent]--include GLOB[/accent]\n"
         "[accent]/permissions[/accent] — show policy; [accent]permissions set policy strict[/accent] "
         "· [accent]permissions reset[/accent]\n"
         "\n"
-        "[muted]Status bar[/muted] (under the prompt) shows policy, session id, persisted state, cwd, "
-        "and a permissions hint. Set [muted]SAGE_SHELL_NO_STATUSBAR=1[/muted] to hide it.\n"
+        "[muted]Framed prompt[/muted]: the input row is wrapped in Unicode box rules (Claude-style “chat row”); "
+        "[muted]SAGE_SHELL_NO_INPUT_FRAME=1[/muted] disables it.\n"
+        "[muted]Status bar[/muted] (under the prompt) is one clipped line: ollama, session, mode, "
+        "policy, model, cwd, [accent]/menu[/accent]. Set [muted]SAGE_SHELL_NO_STATUSBAR=1[/muted] to hide it.\n"
         "Set [muted]SAGE_SHELL_HISTORY_SEARCH=1[/muted] for Ctrl+R history search "
-        "(disables completion-while-typing — prompt_toolkit limitation).\n"
-        "Tab completions use readline-style lists by default; "
-        "[muted]SAGE_SHELL_COLUMN_COMPLETIONS=1[/muted] enables the floating column menu "
-        "(needs a full-featured terminal).\n"
+        "(disables completion-while-typing — use [accent]Ctrl+Space[/accent] or [accent]Tab[/accent] for menus).\n"
+        "Completion layout: COLUMN menu by default; "
+        "[muted]TERM=linux[/muted] without X11/Wayland/SSH uses READLINE_LIKE; "
+        "override with [muted]SAGE_SHELL_COLUMN_COMPLETIONS=1[/muted] or "
+        "[muted]SAGE_SHELL_READLINE_COMPLETIONS=1[/muted].\n"
         "\n"
         "Everything else is a normal CLI invocation without the [muted]sage[/muted] prefix, e.g.\n"
         '  [brand]/doctor[/brand]   [brand]/prep[/brand]   [brand]/run[/brand] [muted]"your goal"[/muted] [muted]--auto[/muted]'
     )
-    c.print()
-    c.print(
-        Panel.fit(
-            body,
-            title="[brand]SAGE shell[/brand]",
-            border_style="#0d9488",
-            padding=(1, 2),
+    with _shell_output_pager_context():
+        c.print()
+        c.print(
+            Panel.fit(
+                body,
+                title="[brand]SAGE shell[/brand]",
+                border_style="#0d9488",
+                padding=(1, 2),
+            )
         )
-    )
-    c.print()
-    print_commands_table()
+        c.print()
+        _print_commands_table_content()
 
 
 def print_skills_panel(*, show_body: str | None = None) -> None:

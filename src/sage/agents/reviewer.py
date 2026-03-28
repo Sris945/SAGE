@@ -32,6 +32,7 @@ from sage.agents.llm_parse import parse_json_object
 from sage.cli.branding import print_agent_line
 from sage.orchestrator.model_router import ModelRouter
 from sage.llm.ollama_safe import chat_with_timeout, OllamaTimeout
+from sage.debug_mode_log import agent_debug_log
 from sage.protocol.schemas import AgentInsight
 
 TEMPLATE_PATH = Path(__file__).parent.parent / "prompt_engine" / "templates" / "reviewer.md"
@@ -78,6 +79,26 @@ def _is_tests_package_file(file: str) -> bool:
     )
 
 
+def _is_documentation_markdown(file: str) -> bool:
+    """Primary markdown docs: rely on planner verification + static checks; skip LLM."""
+    fp = str(file).replace("\\", "/")
+    pl = Path(fp)
+    if pl.suffix.lower() not in (".md", ".mdx"):
+        return False
+    name = pl.name.lower()
+    if name in (
+        "readme.md",
+        "changelog.md",
+        "contributing.md",
+        "security.md",
+        "code_of_conduct.md",
+        "index.md",
+    ):
+        return True
+    parts = pl.parts
+    return "docs" in parts and pl.suffix.lower() in (".md", ".mdx")
+
+
 def _is_src_application_py(file: str) -> bool:
     """Greenfield app modules: LLM reviewer often hallucinates 'empty file' (log: H1 vs non-empty read)."""
     fp = str(file).replace("\\", "/")
@@ -96,6 +117,8 @@ def _reviewer_skip_llm_log_line(file: str) -> str:
         return "Dependency manifest — static + goal checks only (LLM skipped)."
     if _is_tests_package_file(file):
         return "pytest file — static + goal checks only (LLM skipped)."
+    if _is_documentation_markdown(file):
+        return "Documentation markdown — static + task verification only (LLM skipped)."
     if _is_src_application_py(file):
         return (
             "src Python module — static + goal checks only (LLM skipped; "
@@ -255,11 +278,17 @@ class ReviewerAgent:
 
         skip_line = _reviewer_skip_llm_log_line(str(path))
         if skip_line:
+            agent_debug_log(
+                hypothesis_id="H_skip",
+                location="reviewer.py:skip_llm",
+                message="reviewer_llm_skipped",
+                data={"file": str(path), "reason": skip_line, "content_len": len(content)},
+            )
             print_agent_line("Reviewer", skip_line)
             _emit(
                 "observation",
                 severity="low",
-                content="Reviewer LLM skipped (manifest or pytest file).",
+                content="Reviewer LLM skipped (manifest, pytest, or application module).",
             )
             return ReviewResult(
                 passed=True,
@@ -310,6 +339,12 @@ class ReviewerAgent:
                 timeout_s=None,
             )
         except (OllamaTimeout, RuntimeError, Exception) as e:
+            agent_debug_log(
+                hypothesis_id="H_llm",
+                location="reviewer.py:llm_exception",
+                message="reviewer_llm_failed",
+                data={"error": str(e)[:800], "file": file},
+            )
             print_agent_line(
                 "Reviewer", f"Model call failed: {e} — failing review (no silent pass)."
             )
@@ -329,6 +364,16 @@ class ReviewerAgent:
 
         msg = response.get("message") or {}
         raw = msg.get("content", "") if isinstance(msg, dict) else ""
+        agent_debug_log(
+            hypothesis_id="H_llm",
+            location="reviewer.py:after_llm",
+            message="reviewer_llm_raw",
+            data={
+                "file": file,
+                "raw_len": len(raw or ""),
+                "raw_head": (raw or "")[:400],
+            },
+        )
         try:
             data = parse_json_object(raw)
         except (ValueError, json.JSONDecodeError, TypeError) as e:
@@ -356,6 +401,18 @@ class ReviewerAgent:
         suggestion = str(data.get("suggestion", "") or "")
 
         passed = verdict == "PASS" and score >= 0.5
+        agent_debug_log(
+            hypothesis_id="H_verdict",
+            location="reviewer.py:verdict",
+            message="reviewer_verdict",
+            data={
+                "file": file,
+                "verdict": verdict,
+                "score": score,
+                "passed": passed,
+                "issues_head": (issues[0] if issues else "")[:300],
+            },
+        )
         if passed:
             print_agent_line("Reviewer", f"✓ PASS (score={score:.2f})")
         else:
