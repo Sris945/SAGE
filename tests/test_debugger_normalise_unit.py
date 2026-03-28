@@ -8,7 +8,9 @@ from sage.agents import debugger as dbg
 
 
 def test_normalise_patch_request_list() -> None:
-    raw = [{"file": "src/hello.py", "patch": "def greet():\n    return 'hello'\n", "operation": "edit"}]
+    raw = [
+        {"file": "src/hello.py", "patch": "def greet():\n    return 'hello'\n", "operation": "edit"}
+    ]
     d = dbg._normalise_data(raw)
     assert d["file"] == "src/hello.py"
     pr = dbg._to_patch_request(d)

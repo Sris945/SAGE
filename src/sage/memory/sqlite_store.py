@@ -72,7 +72,16 @@ class TaskStore:
                      timestamp, session_date)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (task_id, agent, model, status, tokens_used, error_preview, timestamp, session_date),
+                (
+                    task_id,
+                    agent,
+                    model,
+                    status,
+                    tokens_used,
+                    error_preview,
+                    timestamp,
+                    session_date,
+                ),
             )
             self._conn.commit()
 

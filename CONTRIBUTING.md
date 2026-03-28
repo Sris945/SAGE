@@ -2,10 +2,39 @@
 
 ## Development
 
-Run unit tests (default for every PR):
+Install editable with dev tools (same as CI):
 
 ```bash
 pip install -e ".[dev]"          # matches CI; add `tui` if you use `sage tui` locally
+```
+
+### Lint and format (Ruff)
+
+CI runs **Ruff** on `src/sage` and `tests`. Run locally before pushing:
+
+```bash
+ruff check src/sage tests
+ruff format --check src/sage tests
+```
+
+Auto-fix style:
+
+```bash
+ruff check src/sage tests --fix
+ruff format src/sage tests
+```
+
+Config: **`pyproject.toml`** (`[tool.ruff]`).
+
+### Type checking (Mypy)
+
+CI runs **mypy** on an allowlisted set of modules (see the **“Mypy”** step in **`.github/workflows/ci.yml`**). If you touch those files, run the same command locally so CI stays green.
+
+### Tests
+
+Run unit tests (default for every PR):
+
+```bash
 pytest tests/ -q
 ```
 
@@ -16,14 +45,16 @@ Mocked greenfield wiring-only test: `pytest tests/e2e/` — fast regression, **n
 Run benchmark suite (Phase 4 contract):
 
 ```bash
-PYTHONPATH=src ./.venv/bin/python -m sage.cli.main bench
+sage bench
 ```
 
-Quick smoke run:
+Quick smoke run (with venv activated so `sage` is on `PATH`):
 
 ```bash
-PYTHONPATH=src ./.venv/bin/python -m sage.cli.main run "health check" --auto --silent
+sage run "health check" --auto --silent
 ```
+
+If `sage` is not installed on `PATH`, use `python -m sage.cli.main …` from the repo root with `pip install -e ".[dev]"` active.
 
 ## Adding new spec compliance checks
 

@@ -62,6 +62,7 @@ class EventBus:
                                 # handler must not stall the event bus or crash the
                                 # orchestration thread.
                                 import logging as _logging
+
                                 _logging.getLogger(__name__).error(
                                     "EventBus handler %r failed for event %r: %s",
                                     getattr(handler, "__name__", repr(handler)),
@@ -115,6 +116,7 @@ class EventBus:
                             asyncio.run(result)
                     except Exception as exc:
                         import logging as _logging
+
                         _logging.getLogger(__name__).error(
                             "EventBus handler %r failed for event %r (re-entrant): %s",
                             getattr(handler, "__name__", repr(handler)),

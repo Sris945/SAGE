@@ -34,19 +34,26 @@ After **`sage run`** (including `/run` from the shell), the CLI prints a structu
 ## Headless run (`sage run`)
 
 ```text
-sage run "your goal" [--research | --auto | --silent] [--no-clarify] [--plan-only] [--dry-run] [--repo PATH]
+sage run "your goal" [--research | --auto | --silent] [--no-clarify] [--plan-only] [--dry-run]
+                       [--repo PATH] [--explain-routing] [--fresh] [--include GLOB ...]
 ```
 
-| Mode | Behavior |
-|------|----------|
-| **`--research`** (default) | Human checkpoints: post-plan approval (**`a`** approve / **`r`** reject / **`e`** edit `.sage/last_plan.json` then `sage run --resume`), escalation when the intel feed requires review, destructive tool apply confirmations where applicable. |
+| Mode / flag | Behavior |
+|-------------|----------|
+| **`--research`** (default) | Human checkpoints: post-plan approval (**`a`** approve / **`r`** reject / **`e`** edit `.sage/last_plan.json` then another `sage run "…"` **without** `--fresh`), escalation when the intel feed requires review, destructive tool apply confirmations where applicable. |
 | **`--auto`** | Fewer interactive checkpoints (still logs). |
 | **`--silent`** | Most autonomous; skips failed tasks per policy. |
 | **`--no-clarify`** | Planner does not ask TTY clarifying questions (`SAGE_NO_CLARIFY=1` same). |
 | **`--plan-only`** | Prints planner DAG and writes `.sage/last_plan.json`; no tool execution. |
 | **`--dry-run`** | Does not apply file patches (verification may still run where applicable). |
+| **`--repo PATH`** | Point at an existing repo for codebase intelligence (indexing / retrieval). |
+| **`--explain-routing`** | After the run, print a routing decision summary for the session. |
+| **`--fresh`** | Ignore `memory/handoff.json` (no resume from interrupt snapshot). |
+| **`--include GLOB`** | Repeatable planner scope hints (e.g. `src/**/*.py`). |
 
 Non-interactive automation: set **`SAGE_NON_INTERACTIVE=1`** so plan checkpoints default to approve without blocking on stdin.
+
+**Interrupt resume:** If `memory/handoff.json` exists, the next `sage run "your goal"` loads it unless you pass **`--fresh`**. (Some messages still say `sage run --resume`; there is no separate `--resume` flag.)
 
 ### Run / session environment (selection)
 
@@ -102,16 +109,26 @@ Session state: **`memory/system_state.json`**. Handoff: **`memory/handoff.json`*
 
 ## Other commands (summary)
 
-Run `sage commands` or `sage` → `/commands` for the full catalog. Common entries:
+Run `sage commands` or `sage` → `/commands` for the full catalog.
 
 | Command | Purpose |
 |---------|---------|
-| `sage doctor` | Environment: Python, venv, Ollama, `models.yaml`, optional Textual for TUI |
-| `sage status` / `sage session status` | Last saved session snapshot |
-| `sage bench` | Benchmark suite; `--compare-policy` for static vs RL routing |
+| `sage shell` / bare `sage` (TTY) | Interactive slash-command shell (default when no subcommand) |
+| `sage tui` | Full-screen Textual UI (`pip install 'sage[tui]'` or `textual`) |
+| `sage doctor` | Environment: Python, venv, Ollama, `models.yaml`, optional Textual for TUI (`--json`) |
+| `sage status` | Last saved session snapshot |
+| `sage session` | `reset` / `refresh` / `status` / `handoff` (view or `--clear` interrupt handoff) |
+| `sage prep` | Hardware scan + recommended Ollama pulls (`--disk-budget`, `--json`) |
+| `sage setup` | `scan` \| `suggest` \| `apply` \| `pull` \| `init` — machine-aware Ollama routing |
+| `sage config` | `show` \| `validate` \| `migrate` \| `paths` \| `set` — inspect/edit `models.yaml` |
+| `sage bench` | Benchmark suite; `--out`, `--run-pack-dir`, `--compare-policy` |
 | `sage permissions` | Tool policy; `permissions set …` writes `.sage/policy.json` |
-| `sage rl export` / `train-bc` / `train-cql` | Offline RL dataset and training |
-| `sage config` | Models config paths and edits |
+| `sage rl` | `export`, `collect-synth`, `analyze-rewards`, `eval-offline`, `train-bc`, `train-cql` |
+| `sage sim` | `generate` (oracle JSONL), `run` (parallel pytest; optional `--docker`) |
+| `sage cron` | `weekly-memory-optimizer` — run maintenance jobs on demand |
+| `sage eval` | `golden` \| `e2e` \| `smoke` — trust / regression checks (see tests) |
+
+RL and simulator walkthrough → **[getting_started.md](getting_started.md)**.
 
 ---
 

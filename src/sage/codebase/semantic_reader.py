@@ -33,7 +33,9 @@ except Exception:  # pragma: no cover
     QdrantClient = None  # type: ignore[assignment]
     qmodels = None  # type: ignore[assignment]
 
-_SKIP_DIRS = frozenset({".venv", "venv", ".git", "__pycache__", ".mypy_cache", "node_modules", ".tox"})
+_SKIP_DIRS = frozenset(
+    {".venv", "venv", ".git", "__pycache__", ".mypy_cache", "node_modules", ".tox"}
+)
 _EMBED_MODEL = "nomic-embed-text:latest"
 _COLLECTION = "codebase_chunks"
 _EMBED_DIM = 64
@@ -50,6 +52,7 @@ _qdrant_built: bool = False
 # Private tag exclusion
 # ---------------------------------------------------------------------------
 
+
 def _is_private(text: str) -> bool:
     """Returns True if text contains a <private> exclusion tag."""
     return "<!-- <private> -->" in text or "<private>" in text
@@ -59,10 +62,12 @@ def _is_private(text: str) -> bool:
 # Embedding helpers
 # ---------------------------------------------------------------------------
 
+
 def _embed_text(text: str, timeout_s: float = 2.0) -> list[float]:
     """Embed text via Ollama nomic-embed-text or fall back to hash embedding."""
     try:
         from sage.llm.ollama_safe import embeddings_with_timeout
+
         vec = embeddings_with_timeout(model=_EMBED_MODEL, prompt=text, timeout_s=timeout_s)
         if isinstance(vec, list) and len(vec) == _EMBED_DIM:
             return vec
@@ -94,8 +99,9 @@ def _cosine(a: list[float], b: list[float]) -> float:
 # Tree-sitter symbol extraction
 # ---------------------------------------------------------------------------
 
+
 def _get_node_text(node, src_bytes: bytes) -> str:
-    return src_bytes[node.start_byte:node.end_byte].decode("utf-8", errors="replace")
+    return src_bytes[node.start_byte : node.end_byte].decode("utf-8", errors="replace")
 
 
 def _extract_docstring_from_node(node, src_bytes: bytes) -> str:
@@ -183,7 +189,6 @@ def _symbols_via_tree_sitter(
 
     functions: list[dict[str, Any]] = []
     classes: list[dict[str, Any]] = []
-    lines = txt.splitlines()
 
     def walk(node) -> None:
         if len(functions) >= _MAX_SYMBOLS_PER_FILE and len(classes) >= _MAX_SYMBOLS_PER_FILE:
@@ -199,17 +204,19 @@ def _symbols_via_tree_sitter(
                 doc = _extract_docstring_from_node(node, src_bytes)
                 src_preview = _get_node_text(node, src_bytes)[:300]
                 deps = _extract_import_refs_from_body(node, src_bytes)
-                functions.append({
-                    "name": name,
-                    "file": rel_path,
-                    "line_start": line_start,
-                    "line_end": line_end,
-                    "docstring": doc,
-                    "source_preview": src_preview,
-                    "dependencies": deps,
-                    "complexity": _complexity_label(line_count),
-                    "has_tests": has_tests,
-                })
+                functions.append(
+                    {
+                        "name": name,
+                        "file": rel_path,
+                        "line_start": line_start,
+                        "line_end": line_end,
+                        "docstring": doc,
+                        "source_preview": src_preview,
+                        "dependencies": deps,
+                        "complexity": _complexity_label(line_count),
+                        "has_tests": has_tests,
+                    }
+                )
 
         elif node.type == "class_definition" and len(classes) < _MAX_SYMBOLS_PER_FILE:
             name_node = node.child_by_field_name("name")
@@ -219,15 +226,17 @@ def _symbols_via_tree_sitter(
                 line_end = node.end_point[0] + 1
                 doc = _extract_docstring_from_node(node, src_bytes)
                 methods = _extract_method_names(node, src_bytes)
-                classes.append({
-                    "name": name,
-                    "file": rel_path,
-                    "line_start": line_start,
-                    "line_end": line_end,
-                    "docstring": doc,
-                    "methods": methods,
-                    "has_tests": has_tests,
-                })
+                classes.append(
+                    {
+                        "name": name,
+                        "file": rel_path,
+                        "line_start": line_start,
+                        "line_end": line_end,
+                        "docstring": doc,
+                        "methods": methods,
+                        "has_tests": has_tests,
+                    }
+                )
 
         for ch in node.children:
             walk(ch)
@@ -250,36 +259,40 @@ def _symbols_via_regex(
     for m in def_re.finditer(txt):
         if len(functions) >= _MAX_SYMBOLS_PER_FILE:
             break
-        line_no = txt[:m.start()].count("\n") + 1
+        line_no = txt[: m.start()].count("\n") + 1
         name = m.group(2)
-        src_preview = "\n".join(lines[line_no - 1:line_no + 9])[:300]
-        functions.append({
-            "name": name,
-            "file": rel_path,
-            "line_start": line_no,
-            "line_end": line_no,
-            "docstring": "",
-            "source_preview": src_preview,
-            "dependencies": [],
-            "complexity": "low",
-            "has_tests": has_tests,
-        })
+        src_preview = "\n".join(lines[line_no - 1 : line_no + 9])[:300]
+        functions.append(
+            {
+                "name": name,
+                "file": rel_path,
+                "line_start": line_no,
+                "line_end": line_no,
+                "docstring": "",
+                "source_preview": src_preview,
+                "dependencies": [],
+                "complexity": "low",
+                "has_tests": has_tests,
+            }
+        )
 
     classes: list[dict[str, Any]] = []
     for m in class_re.finditer(txt):
         if len(classes) >= _MAX_SYMBOLS_PER_FILE:
             break
-        line_no = txt[:m.start()].count("\n") + 1
+        line_no = txt[: m.start()].count("\n") + 1
         name = m.group(2)
-        classes.append({
-            "name": name,
-            "file": rel_path,
-            "line_start": line_no,
-            "line_end": line_no,
-            "docstring": "",
-            "methods": [],
-            "has_tests": has_tests,
-        })
+        classes.append(
+            {
+                "name": name,
+                "file": rel_path,
+                "line_start": line_no,
+                "line_end": line_no,
+                "docstring": "",
+                "methods": [],
+                "has_tests": has_tests,
+            }
+        )
 
     return functions, classes
 
@@ -287,6 +300,7 @@ def _symbols_via_regex(
 # ---------------------------------------------------------------------------
 # Qdrant helpers
 # ---------------------------------------------------------------------------
+
 
 def _build_qdrant(chunks: list[dict[str, Any]]) -> tuple[Any, bool]:
     """
@@ -337,6 +351,7 @@ def _build_qdrant(chunks: list[dict[str, Any]]) -> tuple[Any, bool]:
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
 
 def build_semantic_map(repo_path: str) -> dict[str, Any]:
     """
@@ -476,13 +491,15 @@ def query_codebase(question: str, k: int = 5) -> list[dict[str, Any]]:
             out: list[dict[str, Any]] = []
             for hit in getattr(resp, "points", None) or []:
                 payload = getattr(hit, "payload", None) or {}
-                out.append({
-                    "name": payload.get("name", ""),
-                    "file": payload.get("file", ""),
-                    "line": payload.get("line", 0),
-                    "source_preview": payload.get("source_preview", ""),
-                    "score": float(getattr(hit, "score", 0.0) or 0.0),
-                })
+                out.append(
+                    {
+                        "name": payload.get("name", ""),
+                        "file": payload.get("file", ""),
+                        "line": payload.get("line", 0),
+                        "source_preview": payload.get("source_preview", ""),
+                        "score": float(getattr(hit, "score", 0.0) or 0.0),
+                    }
+                )
             return out
         except Exception:
             pass
@@ -499,13 +516,15 @@ def query_codebase(question: str, k: int = 5) -> list[dict[str, Any]]:
         except Exception:
             vec = _hash_embed(embed_text_str)
         score = _cosine(q_vec, vec)
-        scored.append({
-            "name": chunk["name"],
-            "file": chunk["file"],
-            "line": chunk.get("line_start", 0),
-            "source_preview": chunk.get("source_preview", ""),
-            "score": score,
-        })
+        scored.append(
+            {
+                "name": chunk["name"],
+                "file": chunk["file"],
+                "line": chunk.get("line_start", 0),
+                "source_preview": chunk.get("source_preview", ""),
+                "score": score,
+            }
+        )
 
     scored.sort(key=lambda x: x["score"], reverse=True)
     return scored[:k]

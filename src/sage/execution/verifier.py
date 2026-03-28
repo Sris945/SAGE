@@ -69,7 +69,7 @@ def _rewrite_py_compile_off_requirements_manifest(cmd: str) -> str | None:
     for p in parts:
         if str(p).lower().endswith("requirements.txt"):
             return (
-                "python -c \"from pathlib import Path; "
+                'python -c "from pathlib import Path; '
                 "c=[Path('requirements.txt'),Path('src/requirements.txt')]; "
                 "ok=next((x for x in c if x.is_file() and x.read_text(errors='ignore').strip()), None); "
                 "assert ok is not None, 'missing or empty requirements.txt'\""
@@ -101,6 +101,7 @@ def normalize_verification_command_line(command: str) -> str:
         fixed = ["python", "-m", "py_compile", *rest]
         return " ".join(shlex.quote(x) for x in fixed)
     return cmd
+
 
 _CHAIN_SEP = " && "
 

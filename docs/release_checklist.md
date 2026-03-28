@@ -20,7 +20,9 @@ Use this checklist before cutting a release candidate.
 ## 3) Documentation
 
 - [ ] `README.md` quickstart/commands are current.
-- [ ] `CONTRIBUTING.md` references current testing and release workflow.
+- [ ] `docs/README.md` indexes new or renamed guides (full doc map).
+- [ ] `docs/ARCHITECTURE_STATUS.md` matches notable code changes.
+- [ ] `CONTRIBUTING.md` references current testing, Ruff, Mypy, and release workflow.
 
 ## 4) Versioning / changelog
 

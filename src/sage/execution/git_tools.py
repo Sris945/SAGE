@@ -106,9 +106,7 @@ def git_log(repo_path: str, n: int = 10, file: str | None = None) -> dict:
             for line in result.stdout.strip().splitlines():
                 parts = line.split(sep)
                 if len(parts) >= 3:
-                    entries.append(
-                        {"hash": parts[0], "message": parts[1], "date": parts[2]}
-                    )
+                    entries.append({"hash": parts[0], "message": parts[1], "date": parts[2]})
                 elif len(parts) == 2:
                     entries.append({"hash": parts[0], "message": parts[1], "date": ""})
         return {

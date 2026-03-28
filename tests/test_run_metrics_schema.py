@@ -32,7 +32,9 @@ REQUIRED_KEYS = frozenset(
 )
 
 
-def test_build_run_metrics_has_required_keys(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_build_run_metrics_has_required_keys(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     monkeypatch.chdir(tmp_path)
     os.environ["SAGE_SESSION_ID"] = "test-session-metrics"
     from sage.observability.run_metrics import build_run_metrics
@@ -50,15 +52,19 @@ def test_build_run_metrics_has_required_keys(monkeypatch: pytest.MonkeyPatch, tm
     assert not missing, f"missing keys: {missing}"
 
 
-def test_write_run_metrics_json_writes_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_write_run_metrics_json_writes_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     monkeypatch.chdir(tmp_path)
     os.environ["SAGE_SESSION_ID"] = "sess-write-metrics"
-    from sage.observability.run_metrics import build_run_metrics, write_run_metrics_json
+    from sage.observability.run_metrics import write_run_metrics_json
 
     state = {
         "repo_mode": "existing_repo",
         "debug_attempts": 1,
-        "task_dag": {"nodes": [{"id": "t1", "status": "completed", "model_used": "qwen2.5-coder:1.5b"}]},
+        "task_dag": {
+            "nodes": [{"id": "t1", "status": "completed", "model_used": "qwen2.5-coder:1.5b"}]
+        },
         "session_memory": {},
     }
     p = write_run_metrics_json(state, base_dir=tmp_path)

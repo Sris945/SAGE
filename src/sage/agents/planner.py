@@ -84,7 +84,7 @@ _REQ_FASTAPI_SNIPPET = (
 
 # Non-web greenfield: manifest must exist and be non-empty — never py_compile on .txt.
 _REQ_GENERIC_SNIPPET = (
-    "python -c \"from pathlib import Path; "
+    'python -c "from pathlib import Path; '
     "c=[Path('requirements.txt'),Path('src/requirements.txt')]; "
     "ok=next((p for p in c if p.is_file() and p.read_text(errors='ignore').strip()), None); "
     "assert ok is not None, 'missing or empty requirements.txt'\""
@@ -182,12 +182,7 @@ def _repair_dag_if_goal_mismatch(prompt: str, nodes: list[TaskNode]) -> list[Tas
         wt = tests[0].lower().replace("\\", "/")
         if ws in blog and wt in blog:
             return nodes
-    if (
-        "fastapi" in blog
-        or "src/app.py" in blog
-        or "testclient" in blog
-        or "test_app.py" in blog
-    ):
+    if "fastapi" in blog or "src/app.py" in blog or "testclient" in blog or "test_app.py" in blog:
         print_agent_line(
             "Planner",
             "Replacing generic web-app DAG with implement + test tasks matching your goal.",
@@ -334,12 +329,20 @@ def _postprocess_task_nodes(nodes: list[TaskNode], user_goal: str) -> list[TaskN
                         nn = replace(nn, verification=_REQ_FASTAPI_SNIPPET)
                         v = nn.verification
                 else:
-                    if (not v) or "py_compile" in v or (
-                        v and "fastapi" in v.lower() and not want_fastapi_stack
+                    if (
+                        (not v)
+                        or "py_compile" in v
+                        or (v and "fastapi" in v.lower() and not want_fastapi_stack)
                     ):
                         nn = replace(nn, verification=_REQ_GENERIC_SNIPPET)
                         v = nn.verification
-            if want_fastapi_stack and "fastapi" in merged and v and "py_compile" in v and "import app" not in v:
+            if (
+                want_fastapi_stack
+                and "fastapi" in merged
+                and v
+                and "py_compile" in v
+                and "import app" not in v
+            ):
                 if "src/app.py" in v or "src/app.py" in desc_l:
                     if "&&" not in v:
                         nn = replace(nn, verification=_FASTAPI_APP_VERIFY)
@@ -608,7 +611,8 @@ class PlannerAgent:
                 requires_orchestrator_action=True,
             )
             return _fallback_dag_nodes(
-                prompt, log_line="Ollama unavailable — using fallback DAG (heuristic split if applicable)."
+                prompt,
+                log_line="Ollama unavailable — using fallback DAG (heuristic split if applicable).",
             )
 
         try:
@@ -640,7 +644,8 @@ class PlannerAgent:
                 requires_orchestrator_action=True,
             )
             return _fallback_dag_nodes(
-                prompt, log_line="Planner call failed — fallback DAG (heuristic split if applicable)."
+                prompt,
+                log_line="Planner call failed — fallback DAG (heuristic split if applicable).",
             )
 
         raw = response["message"]["content"]
@@ -718,7 +723,8 @@ class PlannerAgent:
                 requires_orchestrator_action=True,
             )
             return _fallback_dag_nodes(
-                prompt, log_line="DAG validation failed — fallback DAG (heuristic split if applicable)."
+                prompt,
+                log_line="DAG validation failed — fallback DAG (heuristic split if applicable).",
             )
 
         if not nodes:

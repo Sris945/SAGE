@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 
-import pytest
-
 from sage.memory.rag_retriever import _recency_weight
 from sage.cli.rules_cmd import _detect_conflicts
 
@@ -13,6 +11,7 @@ from sage.cli.rules_cmd import _detect_conflicts
 # ---------------------------------------------------------------------------
 # _recency_weight tests
 # ---------------------------------------------------------------------------
+
 
 def test_recency_weight_today() -> None:
     today_str = date.today().isoformat()
@@ -61,14 +60,16 @@ def test_recency_weight_decreases_with_age() -> None:
 # _detect_conflicts tests
 # ---------------------------------------------------------------------------
 
+
 def test_detect_always_never_contradiction() -> None:
     rules = [
         "Always use ruff for linting",
         "Never use ruff in this project",
     ]
     conflicts = _detect_conflicts(rules)
-    assert any("always" in c.lower() and "never" in c.lower() for c in conflicts), \
+    assert any("always" in c.lower() and "never" in c.lower() for c in conflicts), (
         f"Expected always/never conflict, got: {conflicts}"
+    )
 
 
 def test_detect_no_conflict_clean_rules() -> None:
@@ -88,8 +89,9 @@ def test_detect_duplicate_rules() -> None:
         "Always run tests before merging pull requests",
     ]
     conflicts = _detect_conflicts(rules)
-    assert any("near-identical" in c or "CONFLICT" in c for c in conflicts), \
+    assert any("near-identical" in c or "CONFLICT" in c for c in conflicts), (
         f"Expected duplicate detection, got: {conflicts}"
+    )
 
 
 def test_detect_negation_pair_use() -> None:
@@ -98,8 +100,9 @@ def test_detect_negation_pair_use() -> None:
         "Do not use httpx anywhere",
     ]
     conflicts = _detect_conflicts(rules)
-    assert any("CONFLICT" in c for c in conflicts), \
+    assert any("CONFLICT" in c for c in conflicts), (
         f"Expected negation conflict for 'use'/'do not use', got: {conflicts}"
+    )
 
 
 def test_detect_numeric_conflict() -> None:
@@ -108,8 +111,9 @@ def test_detect_numeric_conflict() -> None:
         "timeout: 120",
     ]
     conflicts = _detect_conflicts(rules)
-    assert any("timeout" in c for c in conflicts), \
+    assert any("timeout" in c for c in conflicts), (
         f"Expected numeric conflict for timeout, got: {conflicts}"
+    )
 
 
 def test_detect_no_numeric_conflict_same_value() -> None:
@@ -119,7 +123,9 @@ def test_detect_no_numeric_conflict_same_value() -> None:
     ]
     # Same value — no numeric conflict (might flag as duplicate though)
     conflicts = _detect_conflicts(rules)
-    numeric_conflicts = [c for c in conflicts if "incompatible" in c.lower() and "retries" in c.lower()]
+    numeric_conflicts = [
+        c for c in conflicts if "incompatible" in c.lower() and "retries" in c.lower()
+    ]
     assert len(numeric_conflicts) == 0, f"Same numeric value should not be a conflict: {conflicts}"
 
 

@@ -35,9 +35,7 @@ def _install_interrupt_handler(state_ref: list, session_manager) -> None:
         try:
             current_state = state_ref[0] if state_ref else {}
             if current_state:
-                session_manager.write_handoff_from_state(
-                    current_state, reason="manual_interrupt"
-                )
+                session_manager.write_handoff_from_state(current_state, reason="manual_interrupt")
                 print("[SAGE] Handoff saved. Resume with: sage run --resume")
         except Exception as e:
             print(f"[SAGE] Handoff write failed: {e}")

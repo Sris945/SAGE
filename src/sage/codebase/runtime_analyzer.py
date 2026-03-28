@@ -31,7 +31,9 @@ import textwrap
 from pathlib import Path
 from typing import Any
 
-_SKIP_DIRS = frozenset({".venv", "venv", ".git", "__pycache__", ".mypy_cache", "node_modules", ".tox"})
+_SKIP_DIRS = frozenset(
+    {".venv", "venv", ".git", "__pycache__", ".mypy_cache", "node_modules", ".tox"}
+)
 
 # Patterns that indicate a file is unsafe to probe
 _DANGEROUS_PATTERNS = (
@@ -56,6 +58,7 @@ _DANGEROUS_PATTERNS = (
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _module_name_from_path(repo: Path, py: Path) -> str | None:
     """
@@ -113,6 +116,7 @@ def _run_subprocess(cmd: list[str], timeout: float) -> tuple[int, str, str]:
 # Import probe
 # ---------------------------------------------------------------------------
 
+
 def _probe_import(
     repo_path: str,
     module_name: str,
@@ -123,10 +127,7 @@ def _probe_import(
 
     Returns ("ok", None) or ("error", "<error_text>").
     """
-    script = (
-        f"import sys; sys.path.insert(0, {repr(repo_path)}); "
-        f"import {module_name}"
-    )
+    script = f"import sys; sys.path.insert(0, {repr(repo_path)}); import {module_name}"
     rc, _, stderr = _run_subprocess([python_exe, "-c", script], timeout=5.0)
     if rc == -1:
         return "error", "import probe timed out"
@@ -135,7 +136,7 @@ def _probe_import(
     # Extract meaningful portion of traceback
     msg = stderr.strip()
     # Last line is usually the most useful
-    lines = [l for l in msg.splitlines() if l.strip()]
+    lines = [ln for ln in msg.splitlines() if ln.strip()]
     summary = lines[-1][:200] if lines else msg[:200]
     return "error", summary
 
@@ -256,6 +257,7 @@ def _probe_function(
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
 
 def analyze_runtime(repo_path: str, max_files: int = 20) -> dict[str, Any]:
     """

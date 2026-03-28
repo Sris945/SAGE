@@ -5,10 +5,11 @@ High-level map for contributors and readers. Source of truth for behavior is the
 ```
 .
 ├── README.md                 # Project overview
-├── CONTRIBUTING.md           # How to develop and test
-├── pyproject.toml            # Package metadata, sage console script
+├── CONTRIBUTING.md           # Tests, Ruff, Mypy (see CI), contributing workflow
+├── pyproject.toml            # Package metadata, [tool.ruff], sage console script
 ├── startup.sh / startup.ps1  # Optional venv + editable install
-├── docs/                     # User and developer documentation
+├── docs/                     # User and developer docs — index: docs/README.md
+├── sage plan/                # SAGE_ARCHITECTURE_V1_FINAL.md (locked design spec)
 ├── scripts/                  # Local verification, release helpers
 ├── tests/                    # pytest unit + integration + e2e
 ├── sim/                      # Simulator / Docker assets (Phase 6)

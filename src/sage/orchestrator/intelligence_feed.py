@@ -35,9 +35,7 @@ class OrchestratorIntelligenceFeed:
     )
 
     # Active orchestration fields
-    pending_context: dict[str, list[str]] = field(
-        default_factory=lambda: defaultdict(list)
-    )
+    pending_context: dict[str, list[str]] = field(default_factory=lambda: defaultdict(list))
     _high_severity_task_ids: set[str] = field(default_factory=set, repr=False)
     _consumed_note_indices: dict[str, int] = field(default_factory=dict, repr=False)
 

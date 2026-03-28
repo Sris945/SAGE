@@ -149,7 +149,7 @@ def humanize_verify_command(command: str) -> str:
         return "Documentation check"
     if "requirements" in low:
         return "Requirements check"
-    if " -c " in c or " -c\"" in c:
+    if " -c " in c or ' -c"' in c:
         return "Python one-liner check"
     return "Verification step"
 
@@ -282,7 +282,9 @@ def _print_run_report_plain(report: RunReport) -> None:
     print(report.goal)
     print("\n--- Plan ---")
     for t in report.tasks:
-        print(f"  {t.get('id')} [{t.get('status')}] {t.get('assigned_agent')}: {t.get('description')}")
+        print(
+            f"  {t.get('id')} [{t.get('status')}] {t.get('assigned_agent')}: {t.get('description')}"
+        )
     if report.artifacts:
         print("\n--- Files ---")
         for _, p in report.artifacts:

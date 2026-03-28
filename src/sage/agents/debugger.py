@@ -443,14 +443,10 @@ RULES:
                 phase3 = raw_data.get("phase_3_hypothesize", {})
                 if "suspected_cause" not in phase4 and phase3.get("most_likely_cause"):
                     confidence = phase3.get("confidence", 0.8)
-                    phase4["suspected_cause"] = (
-                        f"{phase3['most_likely_cause']} ({confidence:.2f})"
-                    )
+                    phase4["suspected_cause"] = f"{phase3['most_likely_cause']} ({confidence:.2f})"
                 data = _normalise_data(phase4)
                 # Store full 4-phase analysis for observability
-                debug_phases = {
-                    k: v for k, v in raw_data.items() if k.startswith("phase_")
-                }
+                debug_phases = {k: v for k, v in raw_data.items() if k.startswith("phase_")}
             else:
                 data = _normalise_data(raw_data)
                 debug_phases = {}

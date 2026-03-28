@@ -52,8 +52,7 @@ def _infer_architecture(codebase_map: dict[str, Any], conventions: dict[str, Any
         parts.append(f"Entry points: {', '.join(entry_points[:5])}.")
 
     parts.append(
-        f"Codebase: {total_files} Python files, "
-        f"~{total_funcs} functions, ~{total_classes} classes."
+        f"Codebase: {total_files} Python files, ~{total_funcs} functions, ~{total_classes} classes."
     )
 
     if test_locations:
@@ -110,6 +109,7 @@ def build_codebase_brief(repo_path: str) -> dict[str, Any]:
     runtime_analysis_raw: dict[str, Any] = {}
     try:
         from sage.codebase.runtime_analyzer import analyze_runtime
+
         runtime_analysis_raw = analyze_runtime(str(repo), max_files=20)
     except Exception:
         runtime_analysis_raw = {}
@@ -122,18 +122,22 @@ def build_codebase_brief(repo_path: str) -> dict[str, Any]:
     broken_functions: list[dict[str, Any]] = []
     for rel_path, fdata in runtime_analysis_raw.items():
         if fdata.get("import_status") == "error":
-            import_errors.append({
-                "file": rel_path,
-                "error": fdata.get("import_error", ""),
-            })
+            import_errors.append(
+                {
+                    "file": rel_path,
+                    "error": fdata.get("import_error", ""),
+                }
+            )
         for fname, finfo in fdata.get("functions", {}).items():
             if finfo.get("status") in ("runtime_error", "timeout"):
-                broken_functions.append({
-                    "file": rel_path,
-                    "function": fname,
-                    "status": finfo["status"],
-                    "error": finfo.get("error", ""),
-                })
+                broken_functions.append(
+                    {
+                        "file": rel_path,
+                        "function": fname,
+                        "status": finfo["status"],
+                        "error": finfo.get("error", ""),
+                    }
+                )
 
     runtime_summary: dict[str, Any] = {
         "files_analyzed": len(runtime_analysis_raw),
@@ -257,9 +261,7 @@ def build_codebase_brief(repo_path: str) -> dict[str, Any]:
 
     # Write runtime analysis
     try:
-        (cache_dir / "runtime_analysis.json").write_text(
-            json.dumps(runtime_analysis_raw, indent=2)
-        )
+        (cache_dir / "runtime_analysis.json").write_text(json.dumps(runtime_analysis_raw, indent=2))
     except Exception:
         pass
 

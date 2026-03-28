@@ -173,8 +173,9 @@ class CoderAgent:
 
         # 3. Heuristic: look for a path-like token in description (e.g. src/foo.py)
         import re as _re
+
         desc = task.get("description", "")
-        for token in _re.findall(r'[\w./\-]+\.(?:py|ts|js|json|toml|yaml|yml|txt|md)', desc):
+        for token in _re.findall(r"[\w./\-]+\.(?:py|ts|js|json|toml|yaml|yml|txt|md)", desc):
             files.append(token)
 
         # Deduplicate while preserving order
@@ -198,9 +199,7 @@ class CoderAgent:
         for fp in file_paths:
             content = self._read_existing_file(fp)
             if content:
-                blocks.append(
-                    f"### Existing file: {fp}\n```\n{content}\n```"
-                )
+                blocks.append(f"### Existing file: {fp}\n```\n{content}\n```")
         if not blocks:
             return ""
         return (

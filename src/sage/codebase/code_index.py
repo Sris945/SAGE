@@ -95,7 +95,9 @@ def index_repo(repo_path: str, *, incremental: bool = True) -> int:
         try:
             client.create_collection(
                 collection_name=_COLLECTION,
-                vectors_config=qmodels.VectorParams(size=_VECTOR_SIZE, distance=qmodels.Distance.COSINE),
+                vectors_config=qmodels.VectorParams(
+                    size=_VECTOR_SIZE, distance=qmodels.Distance.COSINE
+                ),
             )
         except Exception:
             return 0

@@ -14,6 +14,7 @@ Provides real implementation of:
 from __future__ import annotations
 
 import ast
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -24,46 +25,219 @@ from typing import Any
 # Stdlib module names (covers Python 3.10+)
 # ---------------------------------------------------------------------------
 
+
 def _stdlib_names() -> frozenset[str]:
     """Return the set of top-level stdlib module names."""
     # sys.stdlib_module_names is available since Python 3.10
     if hasattr(sys, "stdlib_module_names"):
         return frozenset(sys.stdlib_module_names)  # type: ignore[attr-defined]
     # Fallback: a broad static set covering the most common stdlib modules.
-    return frozenset({
-        "__future__", "_thread", "abc", "aifc", "argparse", "array", "ast",
-        "asynchat", "asyncio", "asyncore", "atexit", "audioop", "base64",
-        "bdb", "binascii", "binhex", "bisect", "builtins", "bz2", "calendar",
-        "cgi", "cgitb", "chunk", "cmath", "cmd", "code", "codecs", "codeop",
-        "collections", "colorsys", "compileall", "concurrent", "configparser",
-        "contextlib", "contextvars", "copy", "copyreg", "cProfile", "csv",
-        "ctypes", "curses", "dataclasses", "datetime", "dbm", "decimal",
-        "difflib", "dis", "doctest", "email", "encodings", "enum", "errno",
-        "faulthandler", "fcntl", "filecmp", "fileinput", "fnmatch", "fractions",
-        "ftplib", "functools", "gc", "getopt", "getpass", "gettext", "glob",
-        "grp", "gzip", "hashlib", "heapq", "hmac", "html", "http", "idlelib",
-        "imaplib", "importlib", "inspect", "io", "ipaddress", "itertools",
-        "json", "keyword", "lib2to3", "linecache", "locale", "logging",
-        "lzma", "mailbox", "mailcap", "marshal", "math", "mimetypes", "mmap",
-        "modulefinder", "multiprocessing", "netrc", "nis", "nntplib", "numbers",
-        "operator", "optparse", "os", "ossaudiodev", "pathlib", "pdb", "pickle",
-        "pickletools", "pipes", "pkgutil", "platform", "plistlib", "poplib",
-        "posix", "posixpath", "pprint", "profile", "pstats", "pty", "pwd",
-        "py_compile", "pyclbr", "pydoc", "queue", "quopri", "random", "re",
-        "readline", "reprlib", "resource", "rlcompleter", "runpy", "sched",
-        "secrets", "select", "selectors", "shelve", "shlex", "shutil",
-        "signal", "site", "smtpd", "smtplib", "sndhdr", "socket", "socketserver",
-        "spwd", "sqlite3", "sre_compile", "sre_constants", "sre_parse", "ssl",
-        "stat", "statistics", "string", "stringprep", "struct", "subprocess",
-        "sunau", "symtable", "sys", "sysconfig", "syslog", "tabnanny",
-        "tarfile", "telnetlib", "tempfile", "termios", "test", "textwrap",
-        "threading", "time", "timeit", "tkinter", "token", "tokenize", "tomllib",
-        "trace", "traceback", "tracemalloc", "tty", "turtle", "turtledemo",
-        "types", "typing", "unicodedata", "unittest", "urllib", "uu", "uuid",
-        "venv", "warnings", "wave", "weakref", "webbrowser", "wsgiref",
-        "xdrlib", "xml", "xmlrpc", "zipapp", "zipfile", "zipimport", "zlib",
-        "zoneinfo",
-    })
+    return frozenset(
+        {
+            "__future__",
+            "_thread",
+            "abc",
+            "aifc",
+            "argparse",
+            "array",
+            "ast",
+            "asynchat",
+            "asyncio",
+            "asyncore",
+            "atexit",
+            "audioop",
+            "base64",
+            "bdb",
+            "binascii",
+            "binhex",
+            "bisect",
+            "builtins",
+            "bz2",
+            "calendar",
+            "cgi",
+            "cgitb",
+            "chunk",
+            "cmath",
+            "cmd",
+            "code",
+            "codecs",
+            "codeop",
+            "collections",
+            "colorsys",
+            "compileall",
+            "concurrent",
+            "configparser",
+            "contextlib",
+            "contextvars",
+            "copy",
+            "copyreg",
+            "cProfile",
+            "csv",
+            "ctypes",
+            "curses",
+            "dataclasses",
+            "datetime",
+            "dbm",
+            "decimal",
+            "difflib",
+            "dis",
+            "doctest",
+            "email",
+            "encodings",
+            "enum",
+            "errno",
+            "faulthandler",
+            "fcntl",
+            "filecmp",
+            "fileinput",
+            "fnmatch",
+            "fractions",
+            "ftplib",
+            "functools",
+            "gc",
+            "getopt",
+            "getpass",
+            "gettext",
+            "glob",
+            "grp",
+            "gzip",
+            "hashlib",
+            "heapq",
+            "hmac",
+            "html",
+            "http",
+            "idlelib",
+            "imaplib",
+            "importlib",
+            "inspect",
+            "io",
+            "ipaddress",
+            "itertools",
+            "json",
+            "keyword",
+            "lib2to3",
+            "linecache",
+            "locale",
+            "logging",
+            "lzma",
+            "mailbox",
+            "mailcap",
+            "marshal",
+            "math",
+            "mimetypes",
+            "mmap",
+            "modulefinder",
+            "multiprocessing",
+            "netrc",
+            "nis",
+            "nntplib",
+            "numbers",
+            "operator",
+            "optparse",
+            "os",
+            "ossaudiodev",
+            "pathlib",
+            "pdb",
+            "pickle",
+            "pickletools",
+            "pipes",
+            "pkgutil",
+            "platform",
+            "plistlib",
+            "poplib",
+            "posix",
+            "posixpath",
+            "pprint",
+            "profile",
+            "pstats",
+            "pty",
+            "pwd",
+            "py_compile",
+            "pyclbr",
+            "pydoc",
+            "queue",
+            "quopri",
+            "random",
+            "re",
+            "readline",
+            "reprlib",
+            "resource",
+            "rlcompleter",
+            "runpy",
+            "sched",
+            "secrets",
+            "select",
+            "selectors",
+            "shelve",
+            "shlex",
+            "shutil",
+            "signal",
+            "site",
+            "smtpd",
+            "smtplib",
+            "sndhdr",
+            "socket",
+            "socketserver",
+            "spwd",
+            "sqlite3",
+            "sre_compile",
+            "sre_constants",
+            "sre_parse",
+            "ssl",
+            "stat",
+            "statistics",
+            "string",
+            "stringprep",
+            "struct",
+            "subprocess",
+            "sunau",
+            "symtable",
+            "sys",
+            "sysconfig",
+            "syslog",
+            "tabnanny",
+            "tarfile",
+            "telnetlib",
+            "tempfile",
+            "termios",
+            "test",
+            "textwrap",
+            "threading",
+            "time",
+            "timeit",
+            "tkinter",
+            "token",
+            "tokenize",
+            "tomllib",
+            "trace",
+            "traceback",
+            "tracemalloc",
+            "tty",
+            "turtle",
+            "turtledemo",
+            "types",
+            "typing",
+            "unicodedata",
+            "unittest",
+            "urllib",
+            "uu",
+            "uuid",
+            "venv",
+            "warnings",
+            "wave",
+            "weakref",
+            "webbrowser",
+            "wsgiref",
+            "xdrlib",
+            "xml",
+            "xmlrpc",
+            "zipapp",
+            "zipfile",
+            "zipimport",
+            "zlib",
+            "zoneinfo",
+        }
+    )
 
 
 _STDLIB = _stdlib_names()
@@ -72,6 +246,7 @@ _STDLIB = _stdlib_names()
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _read_safe(path: Path) -> str:
     try:
@@ -111,7 +286,7 @@ def _parse_requirements(repo: Path) -> set[str]:
             if in_section and stripped.startswith("["):
                 in_section = False
             if in_section and stripped.startswith('"') or (in_section and "=" in stripped):
-                pkg = re.split(r"[><=!;\[#@\s\"']", stripped)[0].strip().strip('"\'')
+                pkg = re.split(r"[><=!;\[#@\s\"']", stripped)[0].strip().strip("\"'")
                 if pkg:
                     names.add(pkg.lower().replace("-", "_"))
 
@@ -142,6 +317,7 @@ import re as _re  # noqa: E402  (re already imported at top of _parse_requiremen
 # ---------------------------------------------------------------------------
 # Broken import detection
 # ---------------------------------------------------------------------------
+
 
 def _check_broken_imports(
     repo: Path,
@@ -174,14 +350,18 @@ def _check_broken_imports(
                 for alias in node.names:
                     top = alias.name.split(".")[0]
                     import_str = f"import {alias.name}"
-                    _check_top(top, import_str, node.lineno, rel, known_packages, local_mods, broken)
+                    _check_top(
+                        top, import_str, node.lineno, rel, known_packages, local_mods, broken
+                    )
 
             elif isinstance(node, ast.ImportFrom):
                 if node.module:
                     top = node.module.split(".")[0]
                     names_str = ", ".join(a.name for a in node.names[:3])
                     import_str = f"from {node.module} import {names_str}"
-                    _check_top(top, import_str, node.lineno, rel, known_packages, local_mods, broken)
+                    _check_top(
+                        top, import_str, node.lineno, rel, known_packages, local_mods, broken
+                    )
                 elif node.level and node.level > 0:
                     # Relative import — always local
                     continue
@@ -207,17 +387,20 @@ def _check_top(
         return
     if top in local_mods or top_norm in local_mods:
         return
-    broken.append({
-        "file": rel,
-        "import": import_str,
-        "line": lineno,
-        "reason": f"'{top}' not in stdlib, requirements, or local modules",
-    })
+    broken.append(
+        {
+            "file": rel,
+            "import": import_str,
+            "line": lineno,
+            "reason": f"'{top}' not in stdlib, requirements, or local modules",
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
 # Stub function detection
 # ---------------------------------------------------------------------------
+
 
 def _is_stub_body(body: list[ast.stmt]) -> tuple[bool, str]:
     """
@@ -249,7 +432,11 @@ def _is_stub_body(body: list[ast.stmt]) -> tuple[bool, str]:
         stmt = effective[0]
         if isinstance(stmt, ast.Pass):
             return True, "pass"
-        if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Constant) and stmt.value.value is ...:
+        if (
+            isinstance(stmt, ast.Expr)
+            and isinstance(stmt.value, ast.Constant)
+            and stmt.value.value is ...
+        ):
             return True, "ellipsis"
         if isinstance(stmt, ast.Raise):
             exc = stmt.exc
@@ -286,12 +473,14 @@ def _find_stub_functions(
                 continue
             is_stub, stub_type = _is_stub_body(node.body)
             if is_stub:
-                stubs.append({
-                    "file": rel,
-                    "name": node.name,
-                    "line": node.lineno,
-                    "stub_type": stub_type,
-                })
+                stubs.append(
+                    {
+                        "file": rel,
+                        "name": node.name,
+                        "line": node.lineno,
+                        "stub_type": stub_type,
+                    }
+                )
 
     return stubs[:500]
 
@@ -299,6 +488,7 @@ def _find_stub_functions(
 # ---------------------------------------------------------------------------
 # Git log helpers
 # ---------------------------------------------------------------------------
+
 
 def _last_active_files(repo_path: str, n: int = 10) -> list[str]:
     """Return the top-N most recently touched files from git log."""
@@ -329,6 +519,7 @@ def _last_active_files(repo_path: str, n: int = 10) -> list[str]:
 # ---------------------------------------------------------------------------
 # Completion status
 # ---------------------------------------------------------------------------
+
 
 def _count_stubs_in_file(rel: str, stubs: list[dict[str, Any]]) -> int:
     return sum(1 for s in stubs if s["file"] == rel)
@@ -390,12 +581,12 @@ def _derive_completion_status(
 # Missing test detection
 # ---------------------------------------------------------------------------
 
+
 def _find_missing_tests(repo: Path, py_files: list[Path]) -> list[str]:
     """
     Return list of .py files that have no corresponding test_*.py in tests/.
     Skips test files themselves and __init__.py.
     """
-    tests_dir = repo / "tests"
     test_stems: set[str] = set()
 
     # Collect all test file stems
@@ -423,6 +614,7 @@ def _find_missing_tests(repo: Path, py_files: list[Path]) -> list[str]:
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
 
 def assess_state(codebase_map: dict[str, Any], repo_path: str = ".") -> dict[str, Any]:
     """
@@ -487,7 +679,9 @@ def assess_state(codebase_map: dict[str, Any], repo_path: str = ".") -> dict[str
 
     # Completion status
     try:
-        completion_status = _derive_completion_status(codebase_map, stub_functions, missing_tests, repo)
+        completion_status = _derive_completion_status(
+            codebase_map, stub_functions, missing_tests, repo
+        )
     except Exception:
         completion_status = {}
         for f in codebase_map.get("incomplete_files", []):

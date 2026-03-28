@@ -164,7 +164,9 @@ def cmd_rules(args: Namespace) -> None:
 
     if args.rules_command == "add":
         use_global = bool(getattr(args, "global_rules", False))
-        target = (Path.home() / ".sage" / "rules.md") if use_global else (base / ".sage" / "rules.md")
+        target = (
+            (Path.home() / ".sage" / "rules.md") if use_global else (base / ".sage" / "rules.md")
+        )
         bits = getattr(args, "rule_text", None) or []
         line = " ".join(str(x) for x in bits).strip()
         if not line:
@@ -204,10 +206,11 @@ def cmd_rules(args: Namespace) -> None:
         # Rich formatting if available, plain text fallback
         try:
             from rich.console import Console
-            from rich.text import Text
 
             console = Console()
-            console.print("[bold yellow][SAGE rules] validate: issues found (review recommended):[/bold yellow]")
+            console.print(
+                "[bold yellow][SAGE rules] validate: issues found (review recommended):[/bold yellow]"
+            )
             for issue in all_issues:
                 if issue.startswith("CONFLICT:"):
                     console.print(f"  [red]- {issue}[/red]")

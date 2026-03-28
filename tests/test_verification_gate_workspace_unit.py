@@ -11,15 +11,19 @@ from sage.agents.reviewer import ReviewResult
 
 @pytest.fixture
 def _patch_trajectory():
-    with patch(
-        "sage.observability.trajectory_logger.record_quality_delta",
-        lambda **kwargs: None,
-    ), patch(
-        "sage.observability.trajectory_logger.record_trajectory_step",
-        lambda **kwargs: None,
-    ), patch(
-        "sage.orchestrator.workflow.EVENT_BUS.emit_sync",
-        lambda *a, **k: None,
+    with (
+        patch(
+            "sage.observability.trajectory_logger.record_quality_delta",
+            lambda **kwargs: None,
+        ),
+        patch(
+            "sage.observability.trajectory_logger.record_trajectory_step",
+            lambda **kwargs: None,
+        ),
+        patch(
+            "sage.orchestrator.workflow.EVENT_BUS.emit_sync",
+            lambda *a, **k: None,
+        ),
     ):
         yield
 
@@ -37,7 +41,9 @@ def test_verification_gate_passes_resolved_repo_path_as_cwd(
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "app.py").write_text("x = 1\n", encoding="utf-8")
     (tmp_path / "tests").mkdir()
-    (tmp_path / "tests" / "test_app.py").write_text("def test_x():\n    assert 1\n", encoding="utf-8")
+    (tmp_path / "tests" / "test_app.py").write_text(
+        "def test_x():\n    assert 1\n", encoding="utf-8"
+    )
 
     mock_review.return_value = ReviewResult(
         passed=True,

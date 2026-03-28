@@ -97,10 +97,7 @@ def _run_mypy(file: str) -> list[str]:
             timeout=15,
         )
         lines = (result.stdout + result.stderr).splitlines()
-        errors = [
-            ln for ln in lines
-            if ": error:" in ln or ": warning:" in ln
-        ]
+        errors = [ln for ln in lines if ": error:" in ln or ": warning:" in ln]
         return errors
     except FileNotFoundError:
         # mypy not installed — silently skip
@@ -119,8 +116,7 @@ def _score_static_penalties(ruff_violations: list[dict], mypy_errors: list[str])
     Mypy:  -0.10 per type error line,    capped at -0.30
     """
     ruff_e_count = sum(
-        1 for v in ruff_violations
-        if isinstance(v, dict) and str(v.get("code", "")).startswith("E")
+        1 for v in ruff_violations if isinstance(v, dict) and str(v.get("code", "")).startswith("E")
     )
     mypy_count = len(mypy_errors)
     ruff_penalty = min(ruff_e_count * 0.15, 0.40)
@@ -414,7 +410,7 @@ class ReviewerAgent:
         # ── Phase 1: Ruff lint ────────────────────────────────────────────────
         ruff_violations = _run_ruff(file)
         ruff_e_issues = [
-            f"ruff {v.get('code','?')} line {v.get('location',{}).get('row','?')}: {v.get('message','')}"
+            f"ruff {v.get('code', '?')} line {v.get('location', {}).get('row', '?')}: {v.get('message', '')}"
             for v in ruff_violations
             if str(v.get("code", "")).startswith("E")
         ]
@@ -548,9 +544,7 @@ class ReviewerAgent:
 
         # Merge static analysis findings into the issues list
         llm_issues = _coerce_issues(data.get("issues", []))
-        issues = ruff_e_issues + [
-            f"mypy: {ln}" for ln in mypy_errors[:10]
-        ] + llm_issues
+        issues = ruff_e_issues + [f"mypy: {ln}" for ln in mypy_errors[:10]] + llm_issues
 
         # Apply static penalties to LLM score; clamp to [0.0, 1.0]
         score = max(0.0, min(1.0, score - static_penalty))

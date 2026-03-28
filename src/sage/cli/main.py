@@ -5,20 +5,26 @@ SAGE CLI Entry Point
 Usage:
   sage                          # TTY: interactive shell (activation); else help
   sage commands                 # full command catalog (same as /commands in shell)
+  sage shell / sage tui         # explicit shell or Textual full-screen UI
   sage init                     # scaffold .sage/ + memory/ in cwd (not the same as ./startup.sh)
+  sage setup scan|suggest|apply|pull|init   # hardware + Ollama routing helpers
+  sage prep                     # quick hardware scan + recommended pulls (alias-style UX)
+  sage config show|validate|migrate|paths|set   # inspect/edit models.yaml
   sage run "your prompt"        # full pipeline; metrics → .sage/last_run_metrics.json
   sage run "prompt" --auto      # fewer human checkpoints than default --research
   sage run "prompt" --silent    # autonomous; skip failed tasks per policy
   sage run "goal" --plan-only   # DAG only; sage run --fresh ignores handoff
   sage status                   # show current session state
+  sage session reset|refresh|status|handoff
   sage memory                   # list memory/ tree; sage memory digest → weekly_digest.md
   sage rules                    # merged USER_RULES; sage rules validate; sage rules add "…"
   sage permissions              # show policy; `permissions set …` persists in .sage/policy.json
   sage doctor                   # Python, venv, Ollama, models.yaml, optional TUI deps
-  sage bench                    # benchmark suite
-  sage bench --compare-policy   # static vs learned routing (needs RL checkpoints)
-  sage rl export / train-bc / train-cql   # offline RL dataset + trainers
-  sage sim generate / run       # oracle tasks + parallel pytest (Phase 6)
+  sage bench                    # benchmark suite (--out, --run-pack-dir, --compare-policy)
+  sage rl export|collect-synth|analyze-rewards|eval-offline|train-bc|train-cql
+  sage sim generate / run       # oracle tasks + parallel pytest (optional --docker)
+  sage cron weekly-memory-optimizer
+  sage eval golden|e2e|smoke    # trust checks (fixtures / mocked e2e / Ollama smoke)
 
 Models: edit ~/.config/sage/models.yaml (or SAGE_MODELS_YAML). Laptop/CI: SAGE_MODEL_PROFILE=test
 
@@ -272,7 +278,7 @@ def cmd_init(args) -> None:
     except Exception:
         print(
             "[SAGE] Next: sage doctor\n"
-            "       sage run \"Create src/hello.py …\"\n"
+            '       sage run "Create src/hello.py …"\n'
             "       See docs/getting_started.md\n"
         )
 

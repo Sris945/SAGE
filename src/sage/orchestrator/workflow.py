@@ -58,6 +58,7 @@ def _on_memory_checkpoint(event: Event) -> None:
         )
     except Exception as e:
         import logging as _logging
+
         _logging.getLogger(__name__).warning("MEMORY_CHECKPOINT log failed: %s", e)
 
 
@@ -955,14 +956,19 @@ def task_worker(state: SAGEState) -> dict:
             # Accumulate token usage from last agent LLM call.
             try:
                 from sage.llm.ollama_safe import get_last_token_usage
+
                 _usage = get_last_token_usage()
                 if _usage:
                     _cur = local_state.get("token_usage") or {
-                        "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "calls": 0
+                        "prompt_tokens": 0,
+                        "completion_tokens": 0,
+                        "total_tokens": 0,
+                        "calls": 0,
                     }
                     local_state["token_usage"] = {
                         "prompt_tokens": _cur["prompt_tokens"] + _usage.get("prompt_tokens", 0),
-                        "completion_tokens": _cur["completion_tokens"] + _usage.get("completion_tokens", 0),
+                        "completion_tokens": _cur["completion_tokens"]
+                        + _usage.get("completion_tokens", 0),
                         "total_tokens": _cur["total_tokens"] + _usage.get("total_tokens", 0),
                         "calls": _cur["calls"] + 1,
                     }
@@ -973,8 +979,10 @@ def task_worker(state: SAGEState) -> dict:
                 try:
                     import os as _os
                     from sage.llm.ollama_safe import is_overload_error
+
                     if is_overload_error(local_state["last_error"]):
                         from sage.orchestrator.session_manager import SessionManager as _SM
+
                         _SM().write_handoff_from_state(local_state, reason="model_overload")
                         _fallback = _os.environ.get("SAGE_FALLBACK_MODEL", "llama3.2")
                         local_state["model_override"] = _fallback
@@ -1103,6 +1111,22 @@ def merge_task_updates(state: SAGEState) -> SAGEState:
                 )
             except Exception:
                 pass
+            # SQLite task history (best-effort; per-task tokens not yet attributed)
+            if new_status in ("completed", "failed"):
+                try:
+                    from sage.memory.manager import MemoryManager
+
+                    err = str(upd.get("last_error") or "") if new_status == "failed" else ""
+                    MemoryManager().record_task(
+                        task_id=task_id,
+                        agent=str(getattr(task, "assigned_agent", "") or ""),
+                        model=str(getattr(task, "model_used", "") or ""),
+                        status=new_status,
+                        tokens_used=0,
+                        error=err,
+                    )
+                except Exception:
+                    pass
 
         artifact_file = upd.get("artifact_file", "") or ""
         if artifact_file:
@@ -2237,6 +2261,7 @@ def debug_agent(state: SAGEState) -> SAGEState:
         )
     except Exception as e:
         import logging as _logging
+
         _logging.getLogger(__name__).debug("debug_agent trajectory log failed: %s", e)
 
     task.retry_count = next_retry
@@ -2491,6 +2516,7 @@ def save_memory(state: SAGEState) -> SAGEState:
     # Auto weekly digest if ≥7 days old.
     try:
         from sage.memory.digest import maybe_auto_digest
+
         maybe_auto_digest()
     except Exception:
         pass

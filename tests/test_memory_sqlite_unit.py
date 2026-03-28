@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -64,7 +63,9 @@ def test_summary_empty(tmp_store: TaskStore) -> None:
 def test_summary_with_data(tmp_store: TaskStore) -> None:
     tmp_store.record("t1", agent="coder", model="m", status="success", tokens_used=50)
     tmp_store.record("t2", agent="coder", model="m", status="success", tokens_used=50)
-    tmp_store.record("t3", agent="coder", model="m", status="failure", tokens_used=10, error="timeout")
+    tmp_store.record(
+        "t3", agent="coder", model="m", status="failure", tokens_used=10, error="timeout"
+    )
     s = tmp_store.summary(since_days=7)
     assert s["total_tasks"] == 3
     assert abs(s["success_rate"] - 2 / 3) < 0.01

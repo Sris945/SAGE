@@ -140,7 +140,9 @@ def validate_rule_layers(layers: list[RulesLayer]) -> list[str]:
 
     never_kw = set(re.findall(r"never\s+(?:use|call|import)\s+([a-z0-9_./-]+)", combined_lower))
     must_kw = set(
-        re.findall(r"(?:must|always|required to)\s+(?:use|call|import)\s+([a-z0-9_./-]+)", combined_lower)
+        re.findall(
+            r"(?:must|always|required to)\s+(?:use|call|import)\s+([a-z0-9_./-]+)", combined_lower
+        )
     )
     for w in sorted(never_kw & must_kw):
         warnings.append(f"Possible contradiction: both 'never {w}' and 'must/always {w}' appear.")

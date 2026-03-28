@@ -17,6 +17,8 @@ SAGE is a **Python CLI** built around a **LangGraph-style orchestrator**: specia
 | **Configure models** | Per-role primary/fallback: **`~/.config/sage/models.yaml`** (or `$SAGE_MODELS_YAML`), or bundled defaults — see **`docs/models.md`**. |
 | **Rules & memory** | `sage rules` / `sage rules validate` / `sage rules add "…"`; `sage memory` / `sage memory digest` — see **`docs/CLI.md`**. |
 | **Benchmark & RL** | `sage bench`; `sage rl export`, `train-bc`, `train-cql`; `scripts/train_routing_policy.py` — see **`docs/getting_started.md`**. |
+| **Hardware & models** | `sage prep` or `sage setup scan|suggest|apply|pull`; `sage config show|validate|set|migrate` — see **`docs/CLI.md`**. |
+| **Ops & trust** | `sage session` (reset/handoff), `sage cron weekly-memory-optimizer`, `sage eval golden|e2e|smoke` |
 
 ---
 
@@ -121,17 +123,21 @@ Diagrams → **[`docs/architecture.md`](docs/architecture.md)**, **[`docs/archit
 
 | Guide | What it covers |
 |-------|----------------|
+| **[`docs/README.md`](docs/README.md)** | **Full index** of every file in `docs/` (grouped by topic) |
 | **[`docs/INSTALL.md`](docs/INSTALL.md)** | Bootstrap scripts, Windows vs Linux, pip |
 | **[`docs/CLI.md`](docs/CLI.md)** | Shell, env vars, rules, memory digest, run output |
 | **[`docs/models.md`](docs/models.md)** | `models.yaml`, Ollama tags, VRAM, bench timeouts |
 | **[`docs/getting_started.md`](docs/getting_started.md)** | `bench`, `rl`, `sim`, training script |
 | **[`docs/ARCHITECTURE_STATUS.md`](docs/ARCHITECTURE_STATUS.md)** | Spec parity / feature status |
 | **[`docs/architecture.md`](docs/architecture.md)** | Design entrypoints |
+| **[`docs/architecture_diagram.md`](docs/architecture_diagram.md)** | Diagrams |
+| **[`docs/event_bus.md`](docs/event_bus.md)** | Event bus semantics |
 | **[`docs/TRUST_AND_SCALE.md`](docs/TRUST_AND_SCALE.md)** | Policy, trust |
 | **[`docs/LIVE_TESTING.md`](docs/LIVE_TESTING.md)** | Live Ollama, `scripts/live_verify.sh` |
-| **[`CONTRIBUTING.md`](CONTRIBUTING.md)** | Tests, CI |
+| **[`docs/release_checklist.md`](docs/release_checklist.md)** | Release candidate checklist |
+| **[`CONTRIBUTING.md`](CONTRIBUTING.md)** | Tests, **Ruff**, Mypy (CI), CI workflows |
 
-**[`docs/README.md`](docs/README.md)** — short index of `docs/`.
+**Architecture spec (design contract):** [`sage plan/SAGE_ARCHITECTURE_V1_FINAL.md`](sage%20plan/SAGE_ARCHITECTURE_V1_FINAL.md).
 
 ---
 
@@ -152,4 +158,4 @@ Full tree → **[`project_structure.md`](project_structure.md)**.
 
 ## Contributing
 
-See **[`CONTRIBUTING.md`](CONTRIBUTING.md)** — unit tests, benchmarks, live Ollama bar.
+See **[`CONTRIBUTING.md`](CONTRIBUTING.md)** — unit tests, **`ruff check` / `ruff format`**, Mypy allowlist, benchmarks, live Ollama bar.
