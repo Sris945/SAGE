@@ -22,6 +22,7 @@ STATE_FILE = MEMORY_DIR / "system_state.json"
 SESSIONS_DIR = MEMORY_DIR / "sessions"
 FIXES_FILE = MEMORY_DIR / "fixes" / "error_patterns.json"
 LEGACY_FIXES_FILE = MEMORY_DIR / "fix_patterns.json"
+PROJECTS_DIR = MEMORY_DIR / "projects"
 
 
 class MemoryManager:
@@ -35,10 +36,21 @@ class MemoryManager:
             pass
 
     def load_state(self) -> dict:
-        """Layer 1: Load system_state.json. Returns empty dict if missing."""
+        """Layer 1: Load system_state.json. Returns empty dict if missing or corrupt."""
         if STATE_FILE.exists() and STATE_FILE.stat().st_size > 0:
-            with open(STATE_FILE) as f:
-                data = json.load(f)
+            try:
+                with open(STATE_FILE) as f:
+                    data = json.load(f)
+            except (json.JSONDecodeError, OSError) as e:
+                # Corrupted state file (e.g. truncated on prior crash) must
+                # not abort the orchestrator — treat it as a fresh session and
+                # log so the user can investigate.
+                self._log_memory_event(
+                    "MEMORY_CORRUPT",
+                    payload={"key": str(STATE_FILE), "error": str(e), "action": "reset_to_empty"},
+                )
+                print(f"[SAGE] Warning: {STATE_FILE} is corrupt ({e}). Starting with empty state.")
+                return {}
             self._log_memory_event(
                 "MEMORY_READ",
                 payload={"key": str(STATE_FILE), "bytes": int(STATE_FILE.stat().st_size)},
@@ -50,13 +62,11 @@ class MemoryManager:
         STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
         with open(STATE_FILE, "w") as f:
             json.dump(state, f, indent=2)
-        try:
-            self._log_memory_event(
-                "MEMORY_WRITE",
-                payload={"key": str(STATE_FILE), "bytes": int(STATE_FILE.stat().st_size)},
-            )
-        except Exception:
-            pass
+        # Observability is best-effort — never let it hide a real write failure.
+        self._log_memory_event(
+            "MEMORY_WRITE",
+            payload={"key": str(STATE_FILE), "bytes": int(STATE_FILE.stat().st_size)},
+        )
 
     def append_session_log(self, entry: str) -> None:
         """Layer 2: Append-only session journal.
@@ -94,8 +104,18 @@ class MemoryManager:
     def load_fix_patterns(self) -> list[dict]:
         """Layer 4: Load self-learned fix patterns."""
         if FIXES_FILE.exists() and FIXES_FILE.stat().st_size > 0:
-            with open(FIXES_FILE) as f:
-                data = json.load(f)
+            try:
+                with open(FIXES_FILE) as f:
+                    data = json.load(f)
+            except (json.JSONDecodeError, OSError) as e:
+                # Corrupted fix-pattern file must not abort the orchestrator.
+                # Log and return empty list — patterns will be re-learned.
+                self._log_memory_event(
+                    "MEMORY_CORRUPT",
+                    payload={"key": str(FIXES_FILE), "error": str(e), "action": "reset_to_empty"},
+                )
+                print(f"[SAGE] Warning: {FIXES_FILE} is corrupt ({e}). Fix patterns reset.")
+                return []
             self._log_memory_event(
                 "MEMORY_READ",
                 payload={"key": str(FIXES_FILE), "bytes": int(FIXES_FILE.stat().st_size)},
@@ -166,3 +186,58 @@ class MemoryManager:
         """Exact match first. Semantic fallback is Phase 3 (Qdrant)."""
         patterns = self.load_fix_patterns()
         return next((p for p in patterns if p["error_signature"] == error_signature), None)
+
+    # ── Layer 3: Project-scoped memory ───────────────────────────────────────
+
+    def load_project_memory(self, project_name: str) -> str:
+        """Layer 3: Load project-scoped memory. Returns markdown string or ''."""
+        path = PROJECTS_DIR / f"{project_name.replace('/', '_')}.md"
+        try:
+            if path.exists():
+                content = path.read_text(encoding="utf-8")
+                self._log_memory_event(
+                    "MEMORY_READ",
+                    payload={"key": str(path), "bytes": path.stat().st_size},
+                )
+                return content
+        except IOError as e:
+            self._log_memory_event(
+                "MEMORY_ERROR",
+                payload={"key": str(path), "error": str(e), "op": "load_project_memory"},
+            )
+        return ""
+
+    def save_project_memory(self, project_name: str, content: str) -> None:
+        """Layer 3: Write/overwrite project-scoped memory markdown."""
+        path = PROJECTS_DIR / f"{project_name.replace('/', '_')}.md"
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, encoding="utf-8")
+            self._log_memory_event(
+                "MEMORY_WRITE",
+                payload={"key": str(path), "bytes": path.stat().st_size},
+            )
+        except IOError as e:
+            self._log_memory_event(
+                "MEMORY_ERROR",
+                payload={"key": str(path), "error": str(e), "op": "save_project_memory"},
+            )
+
+    def append_project_memory(self, project_name: str, entry: str) -> None:
+        """Layer 3: Append a timestamped entry to project-scoped memory."""
+        path = PROJECTS_DIR / f"{project_name.replace('/', '_')}.md"
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            timestamp = datetime.now(timezone.utc).isoformat()
+            line = f"\n<!-- {timestamp} -->\n{entry}\n"
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(line)
+            self._log_memory_event(
+                "MEMORY_WRITE",
+                payload={"key": str(path), "op": "append", "entry_len": len(entry)},
+            )
+        except IOError as e:
+            self._log_memory_event(
+                "MEMORY_ERROR",
+                payload={"key": str(path), "error": str(e), "op": "append_project_memory"},
+            )

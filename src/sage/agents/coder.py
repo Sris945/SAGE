@@ -123,6 +123,138 @@ class CoderAgent:
         # NOTE: ToolExecutionEngine is used by `tool_executor` in the workflow.
         # The coder agent must only emit PatchRequest objects.
 
+    # ── Private helpers ──────────────────────────────────────────────────────
+
+    @staticmethod
+    def _read_existing_file(file_path: str, max_chars: int = 3000) -> str:
+        """
+        Safely read *file_path* and return its content (truncated to *max_chars*).
+
+        Returns an empty string if the file does not exist or cannot be read.
+        Never raises.
+        """
+        try:
+            p = Path(file_path)
+            if not p.is_file():
+                return ""
+            text = p.read_text(errors="replace")
+            if len(text) > max_chars:
+                return text[:max_chars] + f"\n... (truncated, {len(text)} chars total)"
+            return text
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _extract_referenced_files(task: dict, memory: dict) -> list[str]:
+        """
+        Extract file paths that should be read before generating code.
+
+        Sources checked (in priority order):
+        1. architect_blueprint in memory → files list
+        2. task["target_file"] if set
+        3. Simple heuristic: first path-like token in task["description"]
+        """
+        files: list[str] = []
+
+        # 1. Architect blueprint
+        blueprint = memory.get("architect_blueprint") or {}
+        if isinstance(blueprint, dict):
+            for key in ("files", "target_files", "file_list"):
+                val = blueprint.get(key)
+                if isinstance(val, list):
+                    files.extend(str(f) for f in val if f)
+                elif isinstance(val, str) and val:
+                    files.append(val)
+
+        # 2. Explicit target_file on the task
+        target = task.get("target_file") or task.get("file") or ""
+        if target and str(target).strip():
+            files.append(str(target).strip())
+
+        # 3. Heuristic: look for a path-like token in description (e.g. src/foo.py)
+        import re as _re
+        desc = task.get("description", "")
+        for token in _re.findall(r'[\w./\-]+\.(?:py|ts|js|json|toml|yaml|yml|txt|md)', desc):
+            files.append(token)
+
+        # Deduplicate while preserving order
+        seen: set[str] = set()
+        unique: list[str] = []
+        for f in files:
+            if f not in seen:
+                seen.add(f)
+                unique.append(f)
+        return unique
+
+    def _build_existing_code_context(self, task: dict, memory: dict) -> str:
+        """
+        Return an EXISTING_CODE_CONTEXT block to inject into the coder prompt.
+
+        Reads every referenced file and formats the content as a fenced block.
+        Returns an empty string if no referenced files exist on disk.
+        """
+        file_paths = self._extract_referenced_files(task, memory)
+        blocks: list[str] = []
+        for fp in file_paths:
+            content = self._read_existing_file(fp)
+            if content:
+                blocks.append(
+                    f"### Existing file: {fp}\n```\n{content}\n```"
+                )
+        if not blocks:
+            return ""
+        return (
+            "\n\nEXISTING_CODE_CONTEXT (read these before writing — match style exactly):\n\n"
+            + "\n\n".join(blocks)
+        )
+
+    @staticmethod
+    def _build_conventions_context(session_memory: dict) -> str:
+        """
+        Return a CONVENTIONS_TO_MATCH block if codebase_brief has conventions.
+        Returns empty string otherwise.
+        """
+        codebase_brief = session_memory.get("codebase_brief") or {}
+        if not isinstance(codebase_brief, dict):
+            return ""
+        conventions = codebase_brief.get("conventions")
+        if not conventions:
+            return ""
+        if isinstance(conventions, list):
+            conv_text = "\n".join(f"- {c}" for c in conventions)
+        elif isinstance(conventions, dict):
+            conv_text = json.dumps(conventions, indent=2)
+        else:
+            conv_text = str(conventions)
+        return f"\n\nCONVENTIONS_TO_MATCH (follow these exactly — do not deviate):\n{conv_text}"
+
+    @staticmethod
+    def _build_symbols_context(session_memory: dict) -> str:
+        """
+        Return an EXISTING_SYMBOLS block and reuse instruction if semantic index is available.
+        Returns empty string otherwise.
+        """
+        codebase_brief = session_memory.get("codebase_brief") or {}
+        if not isinstance(codebase_brief, dict):
+            return ""
+        if not codebase_brief.get("semantic_index_built"):
+            return ""
+        symbols_summary = codebase_brief.get("symbols_summary")
+        if not symbols_summary:
+            return ""
+        if isinstance(symbols_summary, list):
+            symbols_text = "\n".join(f"  - {s}" for s in symbols_summary[:50])
+        elif isinstance(symbols_summary, dict):
+            symbols_text = json.dumps(symbols_summary, indent=2)
+        else:
+            symbols_text = str(symbols_summary)[:2000]
+        return (
+            "\n\nEXISTING_SYMBOLS (semantic index available):\n"
+            + symbols_text
+            + "\n\nINSTRUCTION: Before creating any new function, check the EXISTING_SYMBOLS "
+            "list above and reuse existing ones instead of reimplementing."
+        )
+
     def run(
         self,
         task: dict,
@@ -229,11 +361,31 @@ class CoderAgent:
             ),
         )
 
+        # ── Build context-enriched prompt ─────────────────────────────────────
+        # session_memory may be nested under memory["session_memory"] or be memory itself
+        session_memory: dict = (
+            memory.get("session_memory")
+            if isinstance(memory.get("session_memory"), dict)
+            else memory
+        )
+
+        existing_code_ctx = self._build_existing_code_context(task, memory)
+        conventions_ctx = self._build_conventions_context(session_memory)
+        symbols_ctx = self._build_symbols_context(session_memory)
+
         system = (
             self.template.replace("{task_description}", task.get("description", ""))
             .replace("{project_memory_summary}", json.dumps(memory, indent=2))
             .replace("{user_rules}", user_rules)
         )
+        # Inject enriched context blocks BEFORE the system suffix
+        if existing_code_ctx:
+            system = system + existing_code_ctx
+        if conventions_ctx:
+            system = system + conventions_ctx
+        if symbols_ctx:
+            system = system + symbols_ctx
+
         if universal_prefix:
             system = universal_prefix + "\n\n" + system
         # Append strategy-specific instruction after the universal prefix.

@@ -48,13 +48,17 @@ def _on_task_completed(event: Event) -> None:
 def _on_memory_checkpoint(event: Event) -> None:
     """Write a checkpoint line into the session journal."""
     completed_count = int((event.payload or {}).get("completed_count", 0) or 0)
-    from sage.observability.structured_logger import log_event
+    try:
+        from sage.observability.structured_logger import log_event
 
-    log_event(
-        "MEMORY_CHECKPOINT",
-        payload={"completed_count": completed_count},
-        timestamp=event.timestamp,
-    )
+        log_event(
+            "MEMORY_CHECKPOINT",
+            payload={"completed_count": completed_count},
+            timestamp=event.timestamp,
+        )
+    except Exception as e:
+        import logging as _logging
+        _logging.getLogger(__name__).warning("MEMORY_CHECKPOINT log failed: %s", e)
 
 
 def _on_orchestrator_intervention(event: Event) -> None:
@@ -258,7 +262,8 @@ def prompt_middleware(state: SAGEState) -> SAGEState:
         if retriever.build_index() > 0:
             hits = retriever.query(prompt, k=3)
             retrieved_patterns = [h for h in hits if h.get("score", 0) >= 0.5]
-    except Exception:
+    except Exception as e:
+        print(f"[RAG] Pattern capture failed: {e}")
         retrieved_patterns = []
 
     # Inject codebase conventions (if existing-repo mode created `.sage/` cache).
@@ -740,6 +745,18 @@ def scheduler(state: SAGEState) -> SAGEState:
             for n in graph.nodes:
                 if n.status == "pending":
                     n.status = "blocked"
+            try:
+                from sage.observability.structured_logger import log_event
+
+                log_event(
+                    "PIPELINE_BLOCKED",
+                    payload={
+                        "blocked_count": sum(1 for n in graph.nodes if n.status == "blocked"),
+                        "failed_count": sum(1 for n in graph.nodes if n.status == "failed"),
+                    },
+                )
+            except Exception:
+                pass
         return {
             **state,
             "task_dag": graph.to_dict(),
@@ -788,11 +805,32 @@ def scheduler_batch(state: SAGEState) -> SAGEState:
     if not ready:
         if not graph.all_done():
             for n in graph.nodes:
-                # In parallel mode, workers should have finished by the time
-                # we re-enter the scheduler. If some tasks are still "running"
-                # here, we treat them as blocked to guarantee termination.
-                if n.status in ("pending", "running"):
+                if n.status == "running":
+                    # A task left in "running" when the scheduler re-enters means
+                    # its worker exited without updating the DAG (silent crash or
+                    # unhandled exception).  Mark it failed so the retry/debug loop
+                    # can handle it — NOT blocked, which would silently skip it.
+                    n.status = "failed"
+                    print(
+                        f"[SAGE] Warning: task {n.id!r} was still 'running' on "
+                        "scheduler re-entry — marking failed for retry."
+                    )
+                elif n.status == "pending":
+                    # Pending with no ready tasks means an unresolvable dependency
+                    # (e.g. all predecessors failed).  Block to guarantee termination.
                     n.status = "blocked"
+            try:
+                from sage.observability.structured_logger import log_event
+
+                log_event(
+                    "PIPELINE_BLOCKED",
+                    payload={
+                        "blocked_count": sum(1 for n in graph.nodes if n.status == "blocked"),
+                        "failed_count": sum(1 for n in graph.nodes if n.status == "failed"),
+                    },
+                )
+            except Exception:
+                pass
         return {
             **state,
             "task_dag": graph.to_dict(),
@@ -2060,6 +2098,15 @@ def check_fix_patterns(state: SAGEState) -> SAGEState:
                 "fix_operation": pending_patch_request.get("operation", ""),
             },
         )
+        log_event(
+            "PATTERN_LEARNED",
+            payload={
+                "task_id": task.id,
+                "error_signature": error_signature,
+                "fix_file": pending_patch_request.get("file", ""),
+                "source": "fix_pattern_store",
+            },
+        )
     except Exception:
         pass
 
@@ -2148,8 +2195,9 @@ def debug_agent(state: SAGEState) -> SAGEState:
             },
             extra={"patch_preview": patch_preview},
         )
-    except Exception:
-        pass
+    except Exception as e:
+        import logging as _logging
+        _logging.getLogger(__name__).debug("debug_agent trajectory log failed: %s", e)
 
     task.retry_count = next_retry
 
@@ -2215,63 +2263,70 @@ def circuit_breaker(state: SAGEState) -> SAGEState:
         "ollama" in last_error.lower() or "OllamaTimeout".lower() in last_error.lower()
     ):
         task.status = "failed"
-        from sage.observability.trajectory_logger import record_trajectory_step
-        from sage.observability.structured_logger import log_event
+        # Observability is best-effort: a logging failure must never prevent the
+        # circuit breaker from actually marking the task failed.
+        try:
+            from sage.observability.trajectory_logger import record_trajectory_step
+            from sage.observability.structured_logger import log_event
 
-        log_event(
-            "CIRCUIT_BREAKER_ACTIVATED",
-            payload={
-                "task_id": task.id,
-                "reason": "ollama_timeout",
-                "retry_count": int(task.retry_count),
-                "max_retries": max_retries,
-                "error_preview": last_error[:2000],
-            },
-        )
-        record_trajectory_step(
-            task_id=task.id,
-            agent="orchestrator",
-            action_model=getattr(task, "model_used", "") or "",
-            action_strategy_key=getattr(task, "strategy_key", "") or "",
-            reward=0.0,
-            terminal=True,
-            state={"failed_reason": "timeout"},
-            extra={"error": last_error[:2000]},
-        )
+            log_event(
+                "CIRCUIT_BREAKER_ACTIVATED",
+                payload={
+                    "task_id": task.id,
+                    "reason": "ollama_timeout",
+                    "retry_count": int(task.retry_count),
+                    "max_retries": max_retries,
+                    "error_preview": last_error[:2000],
+                },
+            )
+            record_trajectory_step(
+                task_id=task.id,
+                agent="orchestrator",
+                action_model=getattr(task, "model_used", "") or "",
+                action_strategy_key=getattr(task, "strategy_key", "") or "",
+                reward=0.0,
+                terminal=True,
+                state={"failed_reason": "timeout"},
+                extra={"error": last_error[:2000]},
+            )
+        except Exception as _obs_err:
+            print(f"[SAGE] circuit_breaker: observability failed (non-fatal): {_obs_err}")
     elif int(task.retry_count) < max_retries:
         return state
     else:
         task.status = "failed"
-        from sage.observability.structured_logger import log_event
-        from sage.observability.trajectory_logger import record_trajectory_step
+        try:
+            from sage.observability.structured_logger import log_event
+            from sage.observability.trajectory_logger import record_trajectory_step
 
-        log_event(
-            "CIRCUIT_BREAKER_ACTIVATED",
-            payload={
-                "task_id": task.id,
-                "reason": "retry_limit",
-                "retry_count": int(task.retry_count),
-                "max_retries": max_retries,
-                "error_preview": last_error[:2000],
-            },
-        )
-        record_trajectory_step(
-            task_id=task.id,
-            agent="orchestrator",
-            action_model=getattr(task, "model_used", "") or "",
-            action_strategy_key=getattr(task, "strategy_key", "") or "",
-            reward=0.0,
-            terminal=True,
-            state={"failed_reason": "retry_limit"},
-            extra={"error": last_error[:2000]},
-        )
+            log_event(
+                "CIRCUIT_BREAKER_ACTIVATED",
+                payload={
+                    "task_id": task.id,
+                    "reason": "retry_limit",
+                    "retry_count": int(task.retry_count),
+                    "max_retries": max_retries,
+                    "error_preview": last_error[:2000],
+                },
+            )
+            record_trajectory_step(
+                task_id=task.id,
+                agent="orchestrator",
+                action_model=getattr(task, "model_used", "") or "",
+                action_strategy_key=getattr(task, "strategy_key", "") or "",
+                reward=0.0,
+                terminal=True,
+                state={"failed_reason": "retry_limit"},
+                extra={"error": last_error[:2000]},
+            )
+        except Exception as _obs_err:
+            print(f"[SAGE] circuit_breaker: observability failed (non-fatal): {_obs_err}")
 
     for n in graph.nodes:
         if task.id in n.dependencies and n.status == "pending":
             n.status = "blocked"
 
-    return {
-        **state,
+    _cb_base = {
         "task_dag": graph.to_dict(),
         "current_task": vars(task),
         "execution_result": {"status": "error"},
@@ -2283,6 +2338,17 @@ def circuit_breaker(state: SAGEState) -> SAGEState:
         "pending_fix_pattern_context": {},
         "verification_passed": False,
     }
+
+    mode = state.get("mode", "auto")
+    if mode == "research":
+        # Escalate: set orchestrator_escalation flag so human_checkpoint fires.
+        return {**state, **_cb_base, "orchestrator_escalation": True}
+    elif mode == "silent":
+        # Halt silently without prompting human intervention.
+        return {**state, **_cb_base, "pipeline_halted": True}
+    else:
+        # Auto (default): skip and continue.
+        return {**state, **_cb_base}
 
 
 def finalize_plan_only(state: SAGEState) -> SAGEState:

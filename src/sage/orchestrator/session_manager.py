@@ -71,6 +71,52 @@ class SessionManager:
         with open(HANDOFF_PATH, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2)
 
+    def write_handoff_from_state(self, state: dict, reason: str) -> None:
+        """Write handoff.json from a full workflow state dict.
+
+        Extracts key fields and delegates to write_interrupt_handoff.
+        Used by signal handlers to persist a snapshot before exit.
+        """
+        import logging
+
+        try:
+            from sage.orchestrator.handoff_payload import (
+                serialize_insight_feed,
+                snapshot_handoff_state,
+            )
+
+            state_snapshot = snapshot_handoff_state(state)
+            insight_snapshot = serialize_insight_feed(state.get("insight_feed"))
+        except Exception:
+            # Fallback: manually extract minimal fields
+            state_snapshot = {
+                k: state.get(k)
+                for k in (
+                    "task_dag",
+                    "current_task_id",
+                    "last_error",
+                    "mode",
+                    "repo_path",
+                    "user_prompt",
+                )
+                if k in state
+            }
+            insight_snapshot = []
+
+        self.write_interrupt_handoff(
+            reason=reason,
+            state_snapshot=state_snapshot,
+            insight_snapshot=insight_snapshot,
+        )
+        try:
+            logging.getLogger("sage.session").info(
+                "Handoff written: reason=%s task_id=%s",
+                reason,
+                state.get("current_task_id", ""),
+            )
+        except Exception:
+            pass
+
     def clear_handoff(self) -> None:
         """Called on clean SESSION_END."""
         if HANDOFF_PATH.exists():

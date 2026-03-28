@@ -76,6 +76,36 @@ def build_prefix_for_agent(state: SAGEState, *, agent_role: str, task_id: str | 
         user_rules_if_any=user_rules_block,
         workspace_policy_block=format_tool_policy_summary(),
     )
+    # Inject intelligence feed notes for this task
+    feed = state.get("insight_feed")
+    if feed is not None and hasattr(feed, "get_pending_notes"):
+        notes = feed.get_pending_notes(task_id or "")
+        if notes:
+            base_prefix += "\n## ORCHESTRATOR NOTES\n" + "\n".join(f"- {n}" for n in notes)
+
+    # If codebase was semantically indexed, inject relevant symbols for this task
+    brief = (state.get("session_memory") or {}).get("codebase_brief", {})
+    if brief.get("queryable_codebase") and agent_role in ("coder", "debugger"):
+        task_desc = ""
+        if task_id:
+            dag = state.get("task_dag", {})
+            for node in dag.get("nodes", []):
+                if node.get("id") == task_id:
+                    task_desc = node.get("description", "")
+        if task_desc:
+            try:
+                from sage.codebase.semantic_reader import query_codebase
+
+                hits = query_codebase(task_desc, k=3)
+                if hits:
+                    sym_lines = [
+                        f"  - {h['name']} in {h['file']}:{h.get('line', '')} — {h.get('source_preview', '')[:100]}"
+                        for h in hits
+                    ]
+                    base_prefix += "\n## RELEVANT EXISTING CODE\n" + "\n".join(sym_lines)
+            except Exception:
+                pass
+
     if skills_block.strip():
         return base_prefix + "\n\nSKILL DISCIPLINE CONTEXT:\n" + skills_block
     return base_prefix

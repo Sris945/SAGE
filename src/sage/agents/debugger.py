@@ -155,6 +155,138 @@ class DebuggerAgent:
         # `tool_executor` will apply patches safely.
         self.executor = ToolExecutionEngine()
 
+    # ── Private helpers ──────────────────────────────────────────────────────
+
+    def _build_debug_prompt(
+        self,
+        task: dict,
+        error: str,
+        failed_file: str,
+        memory: dict,
+        prefix: str,
+        failure_count: int,
+    ) -> str:
+        """
+        Build the structured 4-phase debug prompt.
+
+        The LLM is forced to reason through reproduction, isolation, hypothesis,
+        and patch in a single structured JSON response. Contextual memory and
+        failure history are included so the model can avoid repeating past mistakes.
+        """
+        memory_summary = json.dumps(memory, indent=2) if memory else "No prior state"
+        fix_patterns_raw = memory.get("retrieved_fix_patterns") or []
+        fix_patterns = json.dumps(fix_patterns_raw, indent=2) if fix_patterns_raw else "None"
+
+        template_section = (
+            self.template.replace("{error_report}", error)
+            .replace("{failed_file}", failed_file)
+            .replace("{task_description}", task.get("description", ""))
+        )
+
+        structured_instructions = f"""
+You are a structured debugger. You must respond with a single JSON object following the exact
+4-phase schema below. Do not include any text outside the JSON.
+
+CONTEXT:
+  Task description : {task.get("description", "(none)")}
+  Failed file      : {failed_file or "(none)"}
+  Failure attempt  : #{failure_count + 1}
+  Project memory   : {memory_summary[:2000]}
+  Known fix patterns: {fix_patterns[:1000]}
+
+ERROR:
+{error}
+
+OUTPUT SCHEMA (respond with this exact structure — all fields required):
+{{
+  "phase_1_reproduce": {{
+    "error_type": "ImportError|RuntimeError|TestFailure|SyntaxError|TypeError|LogicError|Other",
+    "error_location": "file:line or function name",
+    "reproduction_steps": "minimal steps to reproduce"
+  }},
+  "phase_2_isolate": {{
+    "affected_components": ["list of files/functions involved"],
+    "root_cause_candidates": ["candidate 1", "candidate 2"],
+    "eliminated_causes": ["what it is NOT and why"]
+  }},
+  "phase_3_hypothesize": {{
+    "most_likely_cause": "specific, concrete hypothesis",
+    "confidence": 0.0,
+    "reasoning": "why this specific cause leads to the observed error"
+  }},
+  "phase_4_patch": {{
+    "file": "path/to/fix",
+    "operation": "edit",
+    "patch": "full corrected file content",
+    "reason": "one sentence: why this patch fixes the root cause from phase 3",
+    "suspected_cause": "brief cause label (confidence 0-1)",
+    "epistemic_flags": []
+  }}
+}}
+
+RULES:
+- operation must be exactly ONE of: edit, create, run_command
+- patch must be the COMPLETE corrected file content for edit/create
+- Do not patch symptoms. Fix the root cause identified in phase_3_hypothesize.
+- epistemic_flags: ["INFERRED"] if guessing, [] if confident
+- confidence in phase_3_hypothesize: 0.0 (uncertain) to 1.0 (certain)
+
+{template_section}
+"""
+        if prefix:
+            return prefix + "\n\n" + structured_instructions
+        return structured_instructions
+
+    def _record_debug_pattern(
+        self,
+        error_text: str,
+        patch_request: dict,
+        task_id: str,
+    ) -> None:
+        """
+        Best-effort: save a PATTERN_LEARNED event and persist the fix pattern to memory.
+
+        This method MUST NOT raise — any exception is silently swallowed so that
+        pattern recording never interrupts the orchestration pipeline.
+        """
+        try:
+            from sage.memory.manager import MemoryManager
+
+            error_signature = _error_fingerprint(error_text)
+            MemoryManager().save_fix_pattern(
+                {
+                    "error_signature": error_signature,
+                    "suspected_cause": patch_request.get("suspected_cause", "unknown"),
+                    "fix_operation": patch_request.get("operation", "edit"),
+                    "fix_file": patch_request.get("file", ""),
+                    "fix_patch": (patch_request.get("patch") or "")[:500],
+                    "success_rate": 1.0,
+                    "times_applied": 1,
+                    "last_used": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+                    "source": "debugger_4phase",
+                    "task_id": task_id,
+                }
+            )
+        except Exception:
+            pass
+
+        try:
+            from sage.observability.structured_logger import log_event
+
+            log_event(
+                "PATTERN_LEARNED",
+                payload={
+                    "task_id": task_id,
+                    "error_signature": _error_fingerprint(error_text),
+                    "fix_file": patch_request.get("file", ""),
+                    "fix_operation": patch_request.get("operation", ""),
+                    "suspected_cause": patch_request.get("suspected_cause", ""),
+                    "source": "debugger_4phase",
+                },
+            )
+        except Exception:
+            pass
+
     def run(
         self,
         task: dict,
@@ -225,13 +357,15 @@ class DebuggerAgent:
         )
         memory = memory or {}
 
-        system = (
-            self.template.replace("{error_report}", error)
-            .replace("{failed_file}", failed_file)
-            .replace("{task_description}", task.get("description", ""))
+        # Build structured 4-phase prompt
+        system = self._build_debug_prompt(
+            task=task,
+            error=error,
+            failed_file=failed_file,
+            memory=memory,
+            prefix=universal_prefix,
+            failure_count=failure_count,
         )
-        if universal_prefix:
-            system = universal_prefix + "\n\n" + system
 
         print_agent_line("Debugger", f"Using model: {model}")
         err_disp = (error or "").strip() or "(no error text — check reviewer/verify output)"
@@ -302,7 +436,24 @@ class DebuggerAgent:
 
         try:
             raw_data = parse_patch_json(raw)
-            data = _normalise_data(raw_data)
+            # Handle 4-phase structured output: extract phase_4_patch as the patch dict
+            if isinstance(raw_data, dict) and "phase_4_patch" in raw_data:
+                phase4 = raw_data["phase_4_patch"]
+                # Enrich with suspected_cause from phase_3 if available
+                phase3 = raw_data.get("phase_3_hypothesize", {})
+                if "suspected_cause" not in phase4 and phase3.get("most_likely_cause"):
+                    confidence = phase3.get("confidence", 0.8)
+                    phase4["suspected_cause"] = (
+                        f"{phase3['most_likely_cause']} ({confidence:.2f})"
+                    )
+                data = _normalise_data(phase4)
+                # Store full 4-phase analysis for observability
+                debug_phases = {
+                    k: v for k, v in raw_data.items() if k.startswith("phase_")
+                }
+            else:
+                data = _normalise_data(raw_data)
+                debug_phases = {}
             patch_req = _to_patch_request(data)
         except (ValueError, json.JSONDecodeError, KeyError, TypeError, AttributeError) as e:
             print_agent_line("Debugger", f"Parse failed: {e}")
@@ -341,26 +492,50 @@ class DebuggerAgent:
                 "epistemic_flags": [],
             }
 
-        print_agent_line("Debugger", f"✓ Fix generated → {patch_req.file} ({patch_req.operation})")
-        print_agent_line("Debugger", f"Suspected cause: {data.get('suspected_cause', 'unknown')}")
+        suspected_cause = data.get("suspected_cause", "")
+        print_agent_line("Debugger", f"Fix generated → {patch_req.file} ({patch_req.operation})")
+        print_agent_line("Debugger", f"Suspected cause: {suspected_cause or 'unknown'}")
+
+        # Emit 4-phase reasoning summary if available
+        if debug_phases:
+            phase3 = debug_phases.get("phase_3_hypothesize", {})
+            confidence = phase3.get("confidence", 0.0)
+            most_likely = phase3.get("most_likely_cause", "")
+            if most_likely:
+                print_agent_line(
+                    "Debugger",
+                    f"Root cause (confidence={confidence:.2f}): {most_likely[:120]}",
+                )
 
         _emit(
             "observation",
             severity="low",
             content=(
                 f"PatchRequest ready: file={patch_req.file}, operation={patch_req.operation}, "
-                f"suspected_cause={data.get('suspected_cause', '')}"
+                f"suspected_cause={suspected_cause}"
             ),
         )
+
+        # Record learned pattern (best-effort — never crashes caller)
+        self._record_debug_pattern(
+            error_text=error,
+            patch_request={
+                **vars(patch_req),
+                "suspected_cause": suspected_cause,
+            },
+            task_id=str(task.get("id", "")),
+        )
+
         return {
             "status": "patch_ready",
             "patch_request": vars(patch_req),
             "file": patch_req.file,
             "operation": patch_req.operation,
             "reason": patch_req.reason,
-            "suspected_cause": data.get("suspected_cause", ""),
+            "suspected_cause": suspected_cause,
             "error_signature": _error_fingerprint(error),
             "fix_generated": True,
             "epistemic_flags": patch_req.epistemic_flags,
             "error": None,
+            "debug_phases": debug_phases,
         }

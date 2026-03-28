@@ -52,10 +52,23 @@ class EventBus:
                     # even if future refactors call into this worker incorrectly.
                     with self._dispatch_lock:
                         for handler in handlers:
-                            result = handler(event)
-                            # Best-effort: if a handler is async, run it to completion.
-                            if asyncio.iscoroutine(result):
-                                asyncio.run(result)
+                            try:
+                                result = handler(event)
+                                # Best-effort: if a handler is async, run it to completion.
+                                if asyncio.iscoroutine(result):
+                                    asyncio.run(result)
+                            except Exception as exc:
+                                # Log the failure but continue processing — a broken
+                                # handler must not stall the event bus or crash the
+                                # orchestration thread.
+                                import logging as _logging
+                                _logging.getLogger(__name__).error(
+                                    "EventBus handler %r failed for event %r: %s",
+                                    getattr(handler, "__name__", repr(handler)),
+                                    event.type,
+                                    exc,
+                                    exc_info=True,
+                                )
                 finally:
                     done.set()
 
@@ -96,9 +109,19 @@ class EventBus:
             handlers = list(self._handlers.get(event.type, []))
             with self._dispatch_lock:
                 for handler in handlers:
-                    result = handler(event)
-                    if asyncio.iscoroutine(result):
-                        asyncio.run(result)
+                    try:
+                        result = handler(event)
+                        if asyncio.iscoroutine(result):
+                            asyncio.run(result)
+                    except Exception as exc:
+                        import logging as _logging
+                        _logging.getLogger(__name__).error(
+                            "EventBus handler %r failed for event %r (re-entrant): %s",
+                            getattr(handler, "__name__", repr(handler)),
+                            event.type,
+                            exc,
+                            exc_info=True,
+                        )
             return
 
         done = threading.Event()

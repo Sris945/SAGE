@@ -10,6 +10,7 @@ pre-emptive reassignments and prompt injection.
 
 from __future__ import annotations
 
+from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import threading
@@ -32,6 +33,13 @@ class OrchestratorIntelligenceFeed:
     SEVERITY_WEIGHT: dict[str, float] = field(
         default_factory=lambda: {"low": 0.12, "medium": 0.35, "high": 0.65}
     )
+
+    # Active orchestration fields
+    pending_context: dict[str, list[str]] = field(
+        default_factory=lambda: defaultdict(list)
+    )
+    _high_severity_task_ids: set[str] = field(default_factory=set, repr=False)
+    _consumed_note_indices: dict[str, int] = field(default_factory=dict, repr=False)
 
     def _unclear_signal_count(self, task_id: str) -> int:
         n = 0
@@ -71,8 +79,39 @@ class OrchestratorIntelligenceFeed:
         except Exception:
             return
 
+    def _annotate_downstream(self, insight: AgentInsight) -> None:
+        """Append a pending note for medium-severity insights."""
+        tid = str(insight.task_id or "")
+        note = f"ORCHESTRATOR_NOTE [{insight.agent}]: {(insight.content or '')[:300]}"
+        self.pending_context[tid].append(note)
+
+    def _intervene(self, insight: AgentInsight) -> None:
+        """Handle high-severity or requires_orchestrator_action insights."""
+        tid = str(insight.task_id or "")
+        # Emit the ORCHESTRATOR_INTERVENTION event
+        self._emit_intervention_event(
+            insight, cause="agent_insight", action_taken="log_and_event_bus"
+        )
+        # Track high-severity task IDs
+        self._high_severity_task_ids.add(tid)
+        # Also append a note to pending_context
+        note = f"ORCHESTRATOR_NOTE [{insight.agent}]: {(insight.content or '')[:300]}"
+        self.pending_context[tid].append(note)
+
+    def get_pending_notes(self, task_id: str) -> list[str]:
+        """Return all accumulated ORCHESTRATOR_NOTE strings not yet consumed.
+
+        After calling this, marks them as consumed so they don't repeat.
+        """
+        notes = self.pending_context.get(task_id) or []
+        consumed_idx = self._consumed_note_indices.get(task_id, 0)
+        new_notes = notes[consumed_idx:]
+        if new_notes:
+            self._consumed_note_indices[task_id] = len(notes)
+        return list(new_notes)
+
     def ingest(self, insight: AgentInsight) -> None:
-        """Ingest an insight packet and decide whether to intervene (MVP = log-only)."""
+        """Ingest an insight packet and decide whether to intervene."""
         with self._lock:
             # Ensure timestamp exists.
             if not insight.timestamp:
@@ -148,10 +187,12 @@ class OrchestratorIntelligenceFeed:
                         "requires_orchestrator_action": insight.requires_orchestrator_action,
                     }
                 )
-                if insight.severity == "high" or insight.requires_orchestrator_action:
-                    self._emit_intervention_event(
-                        insight, cause="agent_insight", action_taken="log_and_event_bus"
-                    )
+
+            # Active orchestration: annotate or intervene based on severity
+            if insight.severity == "medium":
+                self._annotate_downstream(insight)
+            elif insight.severity == "high" or bool(insight.requires_orchestrator_action):
+                self._intervene(insight)
 
     def get_injected_context(self, task_id: str, *, next_agent: str | None = None) -> str:
         """
@@ -182,9 +223,13 @@ class OrchestratorIntelligenceFeed:
     def should_escalate(self, task_id: str) -> bool:
         """
         Escalate if we have any intervention for this task that is high severity
-        or explicitly requires orchestrator action.
+        or explicitly requires orchestrator action. Also escalates if task has
+        any high-severity insight that hasn't been acknowledged.
         """
         with self._lock:
+            # Check high-severity task set first (fast path)
+            if task_id in self._high_severity_task_ids:
+                return True
             for it in self.interventions:
                 if it.get("task_id") != task_id:
                     continue
@@ -208,39 +253,53 @@ class OrchestratorIntelligenceFeed:
                     return True
             return False
 
-    def task_risk_rank(self, task_id: str) -> int:
+    def task_risk_rank(self, task_id: str) -> float:
         """
-        Deterministic risk rank for scheduling prioritization.
+        Composite risk score for scheduling prioritization.
 
-        Higher number means higher priority:
-          - high severity + requires_action => 3
-          - high severity => 2
-          - medium severity => 1
-          - otherwise => 0
+        Returns sum of severity weights for all insights on this task.
+        Higher score means higher priority / riskier task.
         """
         with self._lock:
-            best = 0
-            for it in self.interventions:
-                if it.get("task_id") != task_id:
+            total = 0.0
+            for ins in self.insights:
+                if getattr(ins, "task_id", "") != task_id:
                     continue
-                severity = it.get("severity") or "low"
-                requires = bool(it.get("requires_orchestrator_action"))
-                rank = 0
-                if severity == "high":
-                    rank = 3 if requires else 2
-                elif severity == "medium":
-                    rank = 1
-                best = max(best, rank)
-            return best
+                sev = (getattr(ins, "severity", "") or "low").lower()
+                total += float(self.SEVERITY_WEIGHT.get(sev, 0.12))
+                if bool(getattr(ins, "requires_orchestrator_action", False)):
+                    total += 0.15
+            return total
 
     def risk_score(self, task_id: str) -> float:
         """Composite risk in [0, 1] for the task."""
         with self._lock:
             return float(self._risk_by_task.get(task_id, 0.0))
 
-    def should_preempt(self, task_id: str, *, threshold: float = 0.85) -> bool:
-        """If True, downstream should prefer larger fallback models for this task."""
-        return self.risk_score(task_id) >= threshold
+    def should_preempt(self, task_id: str) -> bool:
+        """
+        Returns True if this task has any high-severity insight that hasn't been
+        acknowledged. Used by coder to decide if it should use fallback model.
+        """
+        with self._lock:
+            return task_id in self._high_severity_task_ids
+
+    def get_model_override(self, task_id: str) -> str | None:
+        """
+        If a task has a high-severity insight with content containing 'security'
+        or 'complexity', return 'fallback' to trigger model reassignment.
+        Otherwise None.
+        """
+        with self._lock:
+            for ins in self.insights:
+                if getattr(ins, "task_id", "") != task_id:
+                    continue
+                if (getattr(ins, "severity", "") or "").lower() != "high":
+                    continue
+                content = (getattr(ins, "content", "") or "").lower()
+                if "security" in content or "complexity" in content:
+                    return "fallback"
+            return None
 
     def get_reviewer_coder_high_notes(self, task_id: str) -> str:
         """Merge high-severity coder insights for reviewer prefix (spec §11)."""

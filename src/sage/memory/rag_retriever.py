@@ -43,8 +43,8 @@ def _load_patterns() -> list[dict]:
     if FIX_PATTERNS_FILE.exists():
         try:
             return json.loads(FIX_PATTERNS_FILE.read_text())
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[RAG] Failed to load fix patterns from {FIX_PATTERNS_FILE}: {e}")
     return []
 
 
@@ -58,12 +58,16 @@ def _embed(text: str) -> list[float]:
             # Keep this low because the retriever is called frequently inside
             # the workflow retry loop (benchmarks must not stall on embeddings).
             vec = embeddings_with_timeout(model=EMBED_MODEL, prompt=text, timeout_s=0.25)
-            # Enforce fixed dimension so vector-store indexing doesn't
-            # fail when Ollama returns a different embedding size.
-            if isinstance(vec, list) and len(vec) == 64:
+            # Accept any non-empty list returned by Ollama — model dimension
+            # varies (nomic-embed-text=768, mxbai-embed-large=1024, etc.).
+            # Qdrant collection size is set dynamically from the first vector
+            # in build_index(), so all vectors will be consistent within a
+            # session.  The old `== 64` guard incorrectly rejected every real
+            # embedding and silently forced the hash fallback.
+            if isinstance(vec, list) and vec:
                 return vec
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[RAG] Ollama embed failed ({EMBED_MODEL}): {e} — using hash fallback")
 
     # Fallback: cheap deterministic "bag of hashed tokens" embedding.
     # This enables the retriever to remain usable without the ollama package.

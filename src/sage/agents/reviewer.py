@@ -20,6 +20,7 @@ Phase 5 gate (what blocks task completion):
 
 import ast
 import json
+import subprocess
 from pathlib import Path
 from dataclasses import dataclass
 
@@ -37,6 +38,117 @@ from sage.protocol.schemas import AgentInsight
 
 TEMPLATE_PATH = Path(__file__).parent.parent / "prompt_engine" / "templates" / "reviewer.md"
 MAX_REVIEW_LINES = 300
+
+
+def _run_ruff(file: str) -> list[dict]:
+    """
+    Phase 1: Run ruff lint on *file* and return parsed violations.
+
+    Returns an empty list when:
+    - ruff is not installed (FileNotFoundError)
+    - the subprocess times out (TimeoutExpired)
+    - the output is not valid JSON for any other reason
+
+    Never raises.
+    """
+    try:
+        result = subprocess.run(
+            ["ruff", "check", file, "--output-format", "json"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        raw = result.stdout.strip()
+        if not raw:
+            return []
+        parsed = json.loads(raw)
+        if isinstance(parsed, list):
+            return parsed
+        return []
+    except FileNotFoundError:
+        # ruff not installed — silently skip
+        return []
+    except subprocess.TimeoutExpired:
+        return []
+    except (json.JSONDecodeError, ValueError, OSError):
+        return []
+    except Exception:  # pragma: no cover
+        return []
+
+
+def _run_mypy(file: str) -> list[str]:
+    """
+    Phase 2: Run mypy type-check on *file* and return error lines.
+
+    Returns an empty list when:
+    - mypy is not installed (FileNotFoundError)
+    - the subprocess times out (TimeoutExpired)
+    - the file is not Python
+
+    Never raises.
+    """
+    if not str(file).endswith(".py"):
+        return []
+    try:
+        result = subprocess.run(
+            ["mypy", file, "--ignore-missing-imports", "--no-error-summary"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        lines = (result.stdout + result.stderr).splitlines()
+        errors = [
+            ln for ln in lines
+            if ": error:" in ln or ": warning:" in ln
+        ]
+        return errors
+    except FileNotFoundError:
+        # mypy not installed — silently skip
+        return []
+    except subprocess.TimeoutExpired:
+        return []
+    except (OSError, Exception):  # pragma: no cover
+        return []
+
+
+def _score_static_penalties(ruff_violations: list[dict], mypy_errors: list[str]) -> float:
+    """
+    Compute the total score penalty from static analysis findings.
+
+    Ruff:  -0.15 per E-code violation, capped at -0.40
+    Mypy:  -0.10 per type error line,    capped at -0.30
+    """
+    ruff_e_count = sum(
+        1 for v in ruff_violations
+        if isinstance(v, dict) and str(v.get("code", "")).startswith("E")
+    )
+    mypy_count = len(mypy_errors)
+    ruff_penalty = min(ruff_e_count * 0.15, 0.40)
+    mypy_penalty = min(mypy_count * 0.10, 0.30)
+    return ruff_penalty + mypy_penalty
+
+
+def _format_ruff_summary(violations: list[dict]) -> str:
+    """Return a compact one-line ruff summary for prompt injection."""
+    if not violations:
+        return "ruff: no violations found"
+    lines = []
+    for v in violations[:20]:  # cap context to 20 items
+        code = v.get("code", "?")
+        msg = v.get("message", "")
+        row = v.get("location", {}).get("row", "?")
+        lines.append(f"  {code} line {row}: {msg}")
+    suffix = f"\n  … and {len(violations) - 20} more" if len(violations) > 20 else ""
+    return "ruff violations:\n" + "\n".join(lines) + suffix
+
+
+def _format_mypy_summary(errors: list[str]) -> str:
+    """Return a compact mypy summary for prompt injection."""
+    if not errors:
+        return "mypy: no type errors found"
+    shown = errors[:20]
+    suffix = f"\n  … and {len(errors) - 20} more" if len(errors) > 20 else ""
+    return "mypy type errors:\n" + "\n".join(f"  {ln}" for ln in shown) + suffix
 
 
 @dataclass
@@ -299,18 +411,54 @@ class ReviewerAgent:
                 model_used="(static-only)",
             )
 
-        # ── LLM Review ────────────────────────────────────────────────────────
+        # ── Phase 1: Ruff lint ────────────────────────────────────────────────
+        ruff_violations = _run_ruff(file)
+        ruff_e_issues = [
+            f"ruff {v.get('code','?')} line {v.get('location',{}).get('row','?')}: {v.get('message','')}"
+            for v in ruff_violations
+            if str(v.get("code", "")).startswith("E")
+        ]
+        if ruff_violations:
+            print_agent_line("Reviewer", f"Ruff: {len(ruff_violations)} violation(s)")
+        else:
+            print_agent_line("Reviewer", "Ruff: clean")
+
+        # ── Phase 2: Mypy type check ──────────────────────────────────────────
+        mypy_errors = _run_mypy(file)
+        if mypy_errors:
+            print_agent_line("Reviewer", f"Mypy: {len(mypy_errors)} type error(s)")
+        else:
+            print_agent_line("Reviewer", "Mypy: clean")
+
+        static_penalty = _score_static_penalties(ruff_violations, mypy_errors)
+
+        # ── Phase 3: LLM review ───────────────────────────────────────────────
         model = self.router.select(
             "reviewer",
             task_complexity_score=float(task.get("task_complexity_score", 0.0) or 0.0),
             failure_count=failure_count,
         )
         snippet = "\n".join(content.splitlines()[:MAX_REVIEW_LINES])
+
+        # Build static-analysis context block for the LLM prompt
+        static_context = (
+            "\n\nSTATIC ANALYSIS RESULTS (already completed — do NOT re-check syntax):\n"
+            + _format_ruff_summary(ruff_violations)
+            + "\n"
+            + _format_mypy_summary(mypy_errors)
+            + "\n"
+        )
+
         system = (
             self.template.replace("{task_description}", task.get("description", ""))
             .replace("{file_content}", snippet)
             .replace("{file_path}", file)
+            .replace("{static_analysis_context}", static_context)
         )
+        # Inject static context even if template doesn't have the placeholder
+        if "{static_analysis_context}" not in self.template:
+            system = system + static_context
+
         if universal_prefix:
             system = universal_prefix + "\n\n" + system
         print_agent_line("Reviewer", f"Using model: {model}")
@@ -397,7 +545,16 @@ class ReviewerAgent:
             score = float(data.get("score", 0.7))
         except (TypeError, ValueError):
             score = 0.7
-        issues = _coerce_issues(data.get("issues", []))
+
+        # Merge static analysis findings into the issues list
+        llm_issues = _coerce_issues(data.get("issues", []))
+        issues = ruff_e_issues + [
+            f"mypy: {ln}" for ln in mypy_errors[:10]
+        ] + llm_issues
+
+        # Apply static penalties to LLM score; clamp to [0.0, 1.0]
+        score = max(0.0, min(1.0, score - static_penalty))
+
         suggestion = str(data.get("suggestion", "") or "")
 
         passed = verdict == "PASS" and score >= 0.5

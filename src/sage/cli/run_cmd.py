@@ -18,12 +18,33 @@ Flags:
 from __future__ import annotations
 
 import os
+import signal
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
 from sage.cli.log_utils import print_routing_summary_for_session
 from sage.version import get_version
+
+
+def _install_interrupt_handler(state_ref: list, session_manager) -> None:
+    """Install SIGINT/SIGTERM handler that writes handoff.json before exit."""
+
+    def _handler(signum, frame):
+        print("\n[SAGE] Interrupted — writing handoff snapshot...")
+        try:
+            current_state = state_ref[0] if state_ref else {}
+            if current_state:
+                session_manager.write_handoff_from_state(
+                    current_state, reason="manual_interrupt"
+                )
+                print("[SAGE] Handoff saved. Resume with: sage run --resume")
+        except Exception as e:
+            print(f"[SAGE] Handoff write failed: {e}")
+        raise SystemExit(1)
+
+    signal.signal(signal.SIGINT, _handler)
+    signal.signal(signal.SIGTERM, _handler)
 
 
 def _print_run_header(*, mode: str, prompt: str, clarify: bool = True) -> None:
@@ -160,15 +181,26 @@ def cmd_run(args) -> None:
         prev_shell_mode = os.environ.get("SAGE_SHELL_MODE")
         os.environ["SAGE_SHELL_MODE"] = "run"
     last_tick: dict = dict(initial_state)
+    # Mutable ref so signal handler can always access the latest state
+    state_ref: list[dict] = [last_tick]
+    try:
+        from sage.orchestrator.session_manager import SessionManager
+
+        _install_interrupt_handler(state_ref, SessionManager())
+    except Exception:
+        pass
     try:
         if wf._HAS_LANGGRAPH:
             for update in app.stream(initial_state, stream_mode="values"):
                 last_tick = update
+                state_ref[0] = last_tick
         else:
             last_tick = app.invoke(initial_state)
+            state_ref[0] = last_tick
             sticky = getattr(app, "_last_graph_state", None)
             if isinstance(sticky, dict):
                 last_tick = sticky
+                state_ref[0] = last_tick
         if getattr(args, "explain_routing", False):
             print_routing_summary_for_session(new_session_id)
         _print_run_summary(last_tick if isinstance(last_tick, dict) else {})

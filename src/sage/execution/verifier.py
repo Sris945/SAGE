@@ -156,6 +156,68 @@ def _verification_environ(cwd: Path) -> dict[str, str]:
 
 
 class VerificationEngine:
+    def check_importable(self, file_path: str, cwd: str = ".") -> dict:
+        """Phase 0: Check the Python file can be imported without errors."""
+        fp = Path(file_path)
+        if not fp.exists():
+            return {"passed": False, "error": f"File not found: {file_path}"}
+        # Convert file path to module name: strip .py, replace path separators
+        try:
+            rel = fp.with_suffix("")
+            module = str(rel).replace("/", ".").replace("\\", ".").lstrip(".")
+        except Exception as e:
+            return {"passed": False, "error": f"Could not determine module name: {e}"}
+        try:
+            result = subprocess.run(
+                [
+                    "python",
+                    "-c",
+                    f"import sys; sys.path.insert(0, '{cwd}'); import {module}",
+                ],
+                timeout=8,
+                capture_output=True,
+                text=True,
+                shell=False,
+                cwd=str(cwd),
+            )
+            if result.returncode == 0:
+                return {"passed": True, "error": None}
+            return {
+                "passed": False,
+                "error": (result.stderr or result.stdout or "import failed").strip(),
+            }
+        except subprocess.TimeoutExpired:
+            return {"passed": False, "error": f"Import check timed out after 8s for {module}"}
+        except FileNotFoundError:
+            return {"passed": False, "error": "python interpreter not found"}
+
+    def check_ruff(self, file_path: str) -> dict:
+        """Phase 0b: Run ruff on the file. Returns {passed, issues: [str]}."""
+        try:
+            result = subprocess.run(
+                ["ruff", "check", file_path, "--output-format", "text", "--quiet"],
+                timeout=15,
+                capture_output=True,
+                text=True,
+                shell=False,
+            )
+            raw_output = (result.stdout or "").strip()
+            issues = [line for line in raw_output.splitlines() if line.strip()]
+            passed = result.returncode == 0
+            return {"passed": passed, "issues": issues, "error_count": len(issues)}
+        except FileNotFoundError:
+            return {
+                "passed": True,
+                "issues": ["[ruff not installed — skipped]"],
+                "error_count": 0,
+            }
+        except subprocess.TimeoutExpired:
+            return {
+                "passed": True,
+                "issues": ["[ruff timed out after 15s — skipped]"],
+                "error_count": 0,
+            }
+
     def run(self, command: str, cwd: str | None = None) -> dict:
         """
         Run a verification command (or chained commands separated by `` && ``).
@@ -167,19 +229,74 @@ class VerificationEngine:
             "stderr": str,
             "returncode": int,
             "command": str,
+            "import_checked": bool,
+            "ruff_issues": list[str],
           }
         """
         if not command or not command.strip():
-            return {"passed": True, "stdout": "", "stderr": "", "returncode": 0, "command": command}
+            return {
+                "passed": True,
+                "stdout": "",
+                "stderr": "",
+                "returncode": 0,
+                "command": command,
+                "import_checked": False,
+                "ruff_issues": [],
+            }
 
         root = Path(cwd or Path.cwd()).resolve()
+        import_checked = False
+        ruff_issues: list[str] = []
+
+        # Phase 0: import pre-check for Python files.
+        # Skip for chained commands (&&) — the individual steps may not be
+        # importable standalone and we'd falsely abort before running any step.
+        cmd_stripped = command.strip()
+        candidate_file: str | None = None
+        if _CHAIN_SEP in cmd_stripped:
+            pass  # chained command — skip import pre-check
+        elif cmd_stripped.endswith(".py"):
+            candidate_file = cmd_stripped
+        elif cmd_stripped.startswith("python"):
+            parts = cmd_stripped.split()
+            # Look for a .py argument (not a flag)
+            for part in parts[1:]:
+                if part.endswith(".py") and not part.startswith("-"):
+                    candidate_file = part
+                    break
+
+        if candidate_file:
+            fp = Path(candidate_file)
+            if not fp.is_absolute():
+                fp = root / candidate_file
+            if fp.exists():
+                import_checked = True
+                import_result = self.check_importable(str(fp), cwd=str(root))
+                if not import_result["passed"]:
+                    err_msg = import_result.get("error") or "import pre-check failed"
+                    return {
+                        "passed": False,
+                        "stdout": "",
+                        "stderr": f"[import pre-check] {err_msg}",
+                        "returncode": 1,
+                        "command": command,
+                        "import_checked": True,
+                        "ruff_issues": [],
+                    }
+                # Also run ruff while we have the file
+                ruff_result = self.check_ruff(str(fp))
+                ruff_issues = ruff_result.get("issues") or []
+
         chunks = [
             normalize_verification_command_line(c.strip())
             for c in command.split(_CHAIN_SEP)
             if c.strip()
         ]
         if len(chunks) == 1:
-            return self._run_one(chunks[0], root)
+            result = self._run_one(chunks[0], root)
+            result["import_checked"] = import_checked
+            result["ruff_issues"] = ruff_issues
+            return result
 
         out_stdout: list[str] = []
         out_stderr: list[str] = []
@@ -197,6 +314,8 @@ class VerificationEngine:
                     "stderr": "\n".join(out_stderr),
                     "returncode": last_rc,
                     "command": command,
+                    "import_checked": import_checked,
+                    "ruff_issues": ruff_issues,
                 }
         _verify_print_pass(last_rc, chained=True, n_chunks=len(chunks))
         return {
@@ -205,6 +324,8 @@ class VerificationEngine:
             "stderr": "\n".join(out_stderr),
             "returncode": last_rc,
             "command": command,
+            "import_checked": import_checked,
+            "ruff_issues": ruff_issues,
         }
 
     def _run_one(self, command: str, cwd: Path) -> dict:
