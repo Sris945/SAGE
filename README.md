@@ -17,6 +17,7 @@
 </div>
 
 SAGE is a **Python CLI** built around a **LangGraph-style orchestrator**: specialized agents (planner, coder, reviewer, test engineer, …), a **model router** (`models.yaml`), multi-layer **memory**, and optional **Ollama** for local LLMs. Drive it from a **TTY shell** (slash commands, chat threads, intent routing) or headless with `sage run`.
+
 ---
 ⚠️ NOTE: SAGE is an experimental project and currently a work in progress.  
 The architecture is evolving rapidly and many components will undergo significant refinements over time.
