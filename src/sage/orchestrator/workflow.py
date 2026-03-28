@@ -952,6 +952,37 @@ def task_worker(state: SAGEState) -> dict:
         # execute_agent -> tool_executor -> verification/check-fix/debug loop
         if not did_execute_agent:
             local_state.update(execute_agent(local_state))
+            # Accumulate token usage from last agent LLM call.
+            try:
+                from sage.llm.ollama_safe import get_last_token_usage
+                _usage = get_last_token_usage()
+                if _usage:
+                    _cur = local_state.get("token_usage") or {
+                        "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "calls": 0
+                    }
+                    local_state["token_usage"] = {
+                        "prompt_tokens": _cur["prompt_tokens"] + _usage.get("prompt_tokens", 0),
+                        "completion_tokens": _cur["completion_tokens"] + _usage.get("completion_tokens", 0),
+                        "total_tokens": _cur["total_tokens"] + _usage.get("total_tokens", 0),
+                        "calls": _cur["calls"] + 1,
+                    }
+            except Exception:
+                pass
+            # Overload fallback — write handoff and inject model_override for retry.
+            if local_state.get("last_error"):
+                try:
+                    import os as _os
+                    from sage.llm.ollama_safe import is_overload_error
+                    if is_overload_error(local_state["last_error"]):
+                        from sage.orchestrator.session_manager import SessionManager as _SM
+                        _SM().write_handoff_from_state(local_state, reason="model_overload")
+                        _fallback = _os.environ.get("SAGE_FALLBACK_MODEL", "llama3.2")
+                        local_state["model_override"] = _fallback
+                        local_state["last_error"] = (
+                            f"[overload_fallback:{_fallback}] " + local_state["last_error"]
+                        )
+                except Exception:
+                    pass
             local_state.update(tool_executor(local_state))
             did_execute_agent = True
 
@@ -1229,11 +1260,18 @@ def execute_agent(state: SAGEState) -> SAGEState:
         memory["architect_blueprint"] = (state.get("architect_blueprints_by_task") or {}).get(
             task.id, {}
         )
+        # If overload fallback was set, propagate model override to agent.
+        _model_override = state.get("model_override")
+        if _model_override:
+            memory["model_override"] = _model_override
         feed = state.get("insight_feed")
         memory["intel_force_fallback"] = bool(
-            feed is not None
-            and hasattr(feed, "should_preempt")
-            and feed.should_preempt(task.id)
+            _model_override  # overload fallback forces fallback model strategy
+            or (
+                feed is not None
+                and hasattr(feed, "should_preempt")
+                and feed.should_preempt(task.id)
+            )
         )
         coder_result = coder.run(
             task={
@@ -1572,8 +1610,10 @@ def tool_executor(state: SAGEState) -> SAGEState:
             )
 
     engine = ToolExecutionEngine()
+    # "approved" bypasses the executor's destructive-op guard since checkpoint 4 already fired.
+    _exec_mode = "approved" if state.get("mode") == "research" else state.get("mode", "auto")
     try:
-        result = engine.execute(patch_req)
+        result = engine.execute(patch_req, mode=_exec_mode)
     except SafetyViolation as e:
         try:
             from sage.observability.structured_logger import log_event
@@ -2439,6 +2479,21 @@ def save_memory(state: SAGEState) -> SAGEState:
     mm.append_session_log(
         f"[{new_state['last_updated']}] CHECKPOINT completed={len(completed)} pending={len(pending)}"
     )
+    # Write token usage summary if available.
+    token_usage = state.get("token_usage")
+    if token_usage and isinstance(token_usage, dict):
+        mm.append_session_log(
+            f"[TOKEN_SUMMARY] total_tokens={token_usage.get('total_tokens', 0)} "
+            f"prompt={token_usage.get('prompt_tokens', 0)} "
+            f"completion={token_usage.get('completion_tokens', 0)} "
+            f"calls={token_usage.get('calls', 0)}"
+        )
+    # Auto weekly digest if ≥7 days old.
+    try:
+        from sage.memory.digest import maybe_auto_digest
+        maybe_auto_digest()
+    except Exception:
+        pass
     sm.clear_handoff()
 
     # Run memory optimizer — generates .sage-memory.md + prunes stale patterns

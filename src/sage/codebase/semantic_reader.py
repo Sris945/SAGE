@@ -47,6 +47,15 @@ _qdrant_built: bool = False
 
 
 # ---------------------------------------------------------------------------
+# Private tag exclusion
+# ---------------------------------------------------------------------------
+
+def _is_private(text: str) -> bool:
+    """Returns True if text contains a <private> exclusion tag."""
+    return "<!-- <private> -->" in text or "<private>" in text
+
+
+# ---------------------------------------------------------------------------
 # Embedding helpers
 # ---------------------------------------------------------------------------
 
@@ -385,6 +394,10 @@ def build_semantic_map(repo_path: str) -> dict[str, Any]:
         rel = str(py_file.relative_to(repo))
         has_tests = py_file.stem in test_stems
 
+        # Skip entire file if it carries a <private> tag
+        if _is_private(txt):
+            continue
+
         funcs, classes = _symbols_via_tree_sitter(txt, rel, has_tests)
 
         if funcs or classes:
@@ -399,6 +412,7 @@ def build_semantic_map(repo_path: str) -> dict[str, Any]:
                         "source_preview": f["source_preview"],
                     }
                     for f in funcs
+                    if not _is_private(f.get("source_preview", ""))
                 ],
                 "classes": [
                     {
@@ -409,12 +423,15 @@ def build_semantic_map(repo_path: str) -> dict[str, Any]:
                         "has_tests": c["has_tests"],
                     }
                     for c in classes
+                    if not _is_private(c.get("docstring", ""))
                 ],
             }
             for f in funcs:
-                all_chunks.append({**f, "kind": "function"})
+                if not _is_private(f.get("source_preview", "")):
+                    all_chunks.append({**f, "kind": "function"})
             for c in classes:
-                all_chunks.append({**c, "kind": "class"})
+                if not _is_private(c.get("docstring", "")):
+                    all_chunks.append({**c, "kind": "class"})
 
     # Build Qdrant index
     client, ok = _build_qdrant(all_chunks)

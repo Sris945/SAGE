@@ -53,6 +53,8 @@ class SAGEState(TypedDict):
     mode: str  # research | auto | silent
     resume_from_handoff: bool
     clarify: NotRequired[bool]  # planner Q&A; False with --no-clarify / silent
+    token_usage: NotRequired[dict]  # accumulated per-session token counts
+    model_override: NotRequired[str]  # fallback model set on overload
 
 
 # Optional fields used at runtime but not declared on TypedDict (backward compat).

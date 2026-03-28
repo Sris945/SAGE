@@ -57,15 +57,26 @@ class ToolExecutionEngine:
         else:
             self._workspace_roots = default_workspace_roots()
 
-    def execute(self, req: PatchRequest) -> dict:
+    _GIT_OPS = frozenset(("git_commit", "git_diff", "git_log", "git_branch", "git_status"))
+
+    def execute(self, req: PatchRequest, mode: str = "auto") -> dict:
         # Normalise — model sometimes emits enum descriptions like "create | edit | delete"
         op: str = req.operation.split("|")[0].strip().lower()
         req.operation = op  # type: ignore[assignment]
+        # Feature 4: pre-execution destructive-op guard.
+        if self._is_destructive(req) and mode == "research":
+            return {
+                "status": "needs_confirmation",
+                "reason": f"Destructive operation pending: {req.operation} on {req.file}",
+                "req_summary": {"op": req.operation, "file": req.file},
+            }
         self._safety_check(req)
         if req.operation in ("edit", "create", "delete"):
             out = self._filesystem_handler(req)
         elif req.operation == "run_command":
             out = self._terminal_handler(req)
+        elif req.operation in self._GIT_OPS:
+            out = self._git_op(req)
         else:
             raise ValueError(f"Unknown operation: {req.operation}")
         agent_debug_log(
@@ -149,6 +160,78 @@ class ToolExecutionEngine:
                 lock.release()
         # Should never reach here — execute() validates operation first
         raise ValueError(f"Unhandled filesystem operation: {req.operation}")
+
+    def _is_destructive(self, req: PatchRequest) -> bool:
+        """Returns True if this operation is destructive and needs pre-confirmation."""
+        if req.operation == "delete":
+            return True
+        if req.operation == "run_command":
+            cmd = (req.patch or "").lower()
+            return any(
+                k in cmd
+                for k in (
+                    "rm -rf",
+                    "rm -f",
+                    "drop table",
+                    "truncate ",
+                    "git push --force",
+                    "> /dev/null",
+                    "| sudo",
+                )
+            )
+        return False
+
+    def _git_op(self, req: PatchRequest) -> dict:
+        """Route git operations from PatchRequest to git_tools functions."""
+        from sage.execution.git_tools import (
+            git_branch,
+            git_commit,
+            git_diff,
+            git_log,
+            git_status,
+        )
+
+        # Determine repo_path: use req.file as the repo root if it looks like a dir,
+        # otherwise fall back to current working directory.
+        import os
+
+        repo_path = str(req.file or "") or os.getcwd()
+        if not os.path.isdir(repo_path):
+            repo_path = os.getcwd()
+
+        op = req.operation
+        patch = req.patch or ""
+
+        if op == "git_status":
+            return git_status(repo_path)
+
+        if op == "git_diff":
+            staged = "staged" in patch.lower()
+            file_arg = str(req.file) if req.file and os.path.isfile(str(req.file)) else None
+            return git_diff(repo_path, file=file_arg, staged=staged)
+
+        if op == "git_log":
+            n = 10
+            for part in patch.split():
+                if part.startswith("n="):
+                    try:
+                        n = int(part[2:])
+                    except ValueError:
+                        pass
+            return git_log(repo_path, n=n)
+
+        if op == "git_branch":
+            branch_name = str(req.file).strip() if req.file else None
+            create = patch.strip().lower() == "create"
+            return git_branch(repo_path, name=branch_name or None, create=create)
+
+        if op == "git_commit":
+            message = patch or "SAGE auto-commit"
+            files_raw = str(req.file) if req.file else ""
+            files = [f.strip() for f in files_raw.split(",") if f.strip()] if files_raw else None
+            return git_commit(repo_path, message=message, files=files)
+
+        return {"status": "error", "stderr": f"Unknown git operation: {op}"}
 
     def _terminal_handler(self, req: PatchRequest) -> dict:
         """Run command in subprocess with timeout. Never shell=True."""

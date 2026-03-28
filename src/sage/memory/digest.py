@@ -113,3 +113,27 @@ def write_digest(out_path: Path | None = None) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(build_digest_markdown(), encoding="utf-8")
     return path
+
+
+def maybe_auto_digest() -> bool:
+    """
+    Auto-generate weekly digest if the existing one is ≥7 days old or missing.
+    Returns True if digest was written, False if skipped.
+    """
+    try:
+        import time
+
+        digest_path = Path("memory") / "weekly_digest.md"
+        _seven_days_s = 7 * 24 * 60 * 60
+
+        if digest_path.exists():
+            mtime = digest_path.stat().st_mtime
+            age_s = time.time() - mtime
+            if age_s < _seven_days_s:
+                return False
+
+        write_digest(digest_path)
+        print("[SAGE] Weekly digest updated.")
+        return True
+    except Exception:
+        return False

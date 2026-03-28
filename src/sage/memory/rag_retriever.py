@@ -16,6 +16,7 @@ each time (fast, patterns are small). Phase 5 upgrades to persistent Qdrant serv
 """
 
 import json
+from datetime import date
 from pathlib import Path
 import hashlib
 import re
@@ -42,7 +43,9 @@ except Exception:  # pragma: no cover
 def _load_patterns() -> list[dict]:
     if FIX_PATTERNS_FILE.exists():
         try:
-            return json.loads(FIX_PATTERNS_FILE.read_text())
+            patterns = json.loads(FIX_PATTERNS_FILE.read_text())
+            # Filter out patterns explicitly marked private
+            return [p for p in patterns if not p.get("private")]
         except Exception as e:
             print(f"[RAG] Failed to load fix patterns from {FIX_PATTERNS_FILE}: {e}")
     return []
@@ -89,6 +92,18 @@ def _cosine(a: list[float], b: list[float]) -> float:
     return dot / (norm_a * norm_b)
 
 
+def _recency_weight(last_used: str) -> float:
+    """Decay: 1.0 for today, ~0.5 at 30 days, asymptotic to 0."""
+    if not last_used:
+        return 0.5  # unknown recency — neutral
+    try:
+        d = date.fromisoformat(last_used)
+        days = max(0, (date.today() - d).days)
+        return 1.0 / (1.0 + days / 30.0)
+    except (ValueError, TypeError):
+        return 0.5
+
+
 class RagRetriever:
     """
     Lightweight in-memory RAG over fix_patterns.json.
@@ -115,6 +130,9 @@ class RagRetriever:
         self._index = []
 
         for p in patterns:
+            # Skip private patterns (double-check here in case _load_patterns is bypassed)
+            if p.get("private"):
+                continue
             # Build a rich query text from the pattern fields
             text = " ".join(
                 filter(
@@ -192,24 +210,34 @@ class RagRetriever:
 
         if self._use_qdrant and self._qdrant is not None:
             try:
+                # Fetch k*3 candidates for re-ranking with blended score
                 resp = self._qdrant.query_points(
                     collection_name=COLLECTION,
-                    limit=k,
+                    limit=k * 3,
                     query=query_vec,
                 )
-                out: list[dict] = []
+                candidates: list[dict] = []
                 for h in getattr(resp, "points", None) or []:
                     payload = getattr(h, "payload", None) or {}
                     pattern = payload.get("pattern") or {}
-                    score_val = float(getattr(h, "score", 0.0) or 0.0)
-                    out.append({**pattern, "score": score_val})
-                return out
+                    cosine_score = float(getattr(h, "score", 0.0) or 0.0)
+                    success_rate = float(pattern.get("success_rate", 0.0) or 0.0)
+                    recency = _recency_weight(pattern.get("last_used", ""))
+                    blended = 0.70 * cosine_score + 0.20 * success_rate + 0.10 * recency
+                    candidates.append({**pattern, "score": blended})
+                candidates.sort(key=lambda x: x["score"], reverse=True)
+                return candidates[:k]
             except Exception as e:
                 print(f"[RAG] Qdrant query failed — fallback to cosine scoring: {e}")
 
-        scored = [
-            {**item["pattern"], "score": _cosine(query_vec, item["vector"])} for item in self._index
-        ]
+        scored = []
+        for item in self._index:
+            cosine_score = _cosine(query_vec, item["vector"])
+            pattern = item["pattern"]
+            success_rate = float(pattern.get("success_rate", 0.0) or 0.0)
+            recency = _recency_weight(pattern.get("last_used", ""))
+            blended = 0.70 * cosine_score + 0.20 * success_rate + 0.10 * recency
+            scored.append({**pattern, "score": blended})
         scored.sort(key=lambda x: x["score"], reverse=True)
         return scored[:k]
 

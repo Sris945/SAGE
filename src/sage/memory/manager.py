@@ -17,6 +17,8 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
+from sage.memory.sqlite_store import TaskStore
+
 MEMORY_DIR = Path("memory")
 STATE_FILE = MEMORY_DIR / "system_state.json"
 SESSIONS_DIR = MEMORY_DIR / "sessions"
@@ -240,4 +242,40 @@ class MemoryManager:
             self._log_memory_event(
                 "MEMORY_ERROR",
                 payload={"key": str(path), "error": str(e), "op": "append_project_memory"},
+            )
+
+    # ── Task Store (SQLite) ──────────────────────────────────────────────────
+
+    _task_store: "TaskStore | None" = None
+
+    @property
+    def task_store(self) -> TaskStore:
+        """Lazy-initialized TaskStore singleton."""
+        if self._task_store is None:
+            self._task_store = TaskStore()
+        return self._task_store
+
+    def record_task(
+        self,
+        task_id: str,
+        agent: str,
+        model: str,
+        status: str,
+        tokens_used: int = 0,
+        error: str = "",
+    ) -> None:
+        """Record a task execution to the SQLite task store (best-effort)."""
+        try:
+            self.task_store.record(
+                task_id=task_id,
+                agent=agent,
+                model=model,
+                status=status,
+                tokens_used=tokens_used,
+                error=error,
+            )
+        except Exception as e:
+            self._log_memory_event(
+                "MEMORY_ERROR",
+                payload={"op": "record_task", "task_id": task_id, "error": str(e)},
             )

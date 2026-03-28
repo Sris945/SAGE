@@ -27,6 +27,30 @@ class OllamaTimeout(RuntimeError):
     pass
 
 
+# Module-level token usage store — callers read after chat_with_timeout().
+_last_token_usage: dict = {}
+
+
+def get_last_token_usage() -> dict:
+    """Returns token usage from the most recent chat_with_timeout() call."""
+    return dict(_last_token_usage)
+
+
+def is_overload_error(error: str) -> bool:
+    """Returns True if the error looks like model/server overload."""
+    s = (error or "").lower()
+    return any(
+        k in s
+        for k in (
+            "overloaded",
+            "model is busy",
+            "503",
+            "resource exhausted",
+            "too many requests",
+        )
+    )
+
+
 def default_chat_timeout_s() -> float | None:
     """
     Global default for ``ollama.chat`` wait time (passed to ``Future.result``).
@@ -172,6 +196,9 @@ def chat_with_timeout(
     options: Optional[dict[str, Any]] = None,
     timeout_s: float | None = None,
 ) -> dict[str, Any]:
+    global _last_token_usage
+    _last_token_usage = {}  # clear at start of each call
+
     if ollama is None:
         raise RuntimeError("ollama module not installed")
 
@@ -214,17 +241,28 @@ def chat_with_timeout(
             try:
                 usage = resp.get("usage") if isinstance(resp, dict) else None
                 if usage and isinstance(usage, dict):
-                    from sage.observability.structured_logger import log_event
-
-                    payload = {
-                        "operation": "chat",
-                        "model": model,
-                        "prompt_tokens": usage.get("prompt_tokens"),
-                        "completion_tokens": usage.get("completion_tokens"),
-                        "total_tokens": usage.get("total_tokens"),
+                    pt = usage.get("prompt_tokens") or 0
+                    ct = usage.get("completion_tokens") or 0
+                    tt = usage.get("total_tokens") or 0
+                    # Populate module-level store for callers.
+                    _last_token_usage = {
+                        "prompt_tokens": pt,
+                        "completion_tokens": ct,
+                        "total_tokens": tt,
                     }
-                    if any(v is not None for v in payload.values()):
+                    try:
+                        from sage.observability.structured_logger import log_event
+
+                        payload = {
+                            "operation": "chat",
+                            "model": model,
+                            "prompt_tokens": pt,
+                            "completion_tokens": ct,
+                            "total_tokens": tt,
+                        }
                         log_event("TOKEN_USAGE", payload=payload)
+                    except Exception:
+                        pass
             except Exception:
                 pass
             return resp
