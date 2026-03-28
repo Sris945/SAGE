@@ -296,9 +296,7 @@ class _SageSlashCompleter(Completer):
         singles = [w for w in self._words if " " not in w]
         return sorted(singles)[:48]
 
-    def get_completions(
-        self, document, complete_event: CompleteEvent
-    ) -> Iterable[Completion]:
+    def get_completions(self, document, complete_event: CompleteEvent) -> Iterable[Completion]:
         ev = complete_event
         text = document.text_before_cursor
         if text.endswith(" "):

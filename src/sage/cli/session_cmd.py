@@ -42,7 +42,9 @@ def cmd_session_handoff(args) -> None:
     p = Path("memory/handoff.json")
     c.print()
     if not p.is_file():
-        c.print("  [muted]No handoff file —[/muted] [accent]memory/handoff.json[/accent] [muted]missing.[/muted]")
+        c.print(
+            "  [muted]No handoff file —[/muted] [accent]memory/handoff.json[/accent] [muted]missing.[/muted]"
+        )
         c.print()
         return
     try:
@@ -76,7 +78,9 @@ def cmd_session_handoff(args) -> None:
         except OSError as e:
             c.print(f"  [accent]![/accent]  Could not delete: {e}")
     else:
-        c.print("  [muted]Next[/muted] [accent]sage run[/accent] [muted]applies this snapshot unless you pass[/muted] [accent]--fresh[/accent][muted].[/muted]")
+        c.print(
+            "  [muted]Next[/muted] [accent]sage run[/accent] [muted]applies this snapshot unless you pass[/muted] [accent]--fresh[/accent][muted].[/muted]"
+        )
     c.print()
 
 

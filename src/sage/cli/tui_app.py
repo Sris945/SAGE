@@ -73,7 +73,9 @@ def _exec_cli_line(line: str, log) -> None:
         return
 
     if getattr(ns, "command", None) == "shell":
-        log.write("[yellow]Open[/yellow] `sage shell` in another terminal — nested shell is disabled in TUI.")
+        log.write(
+            "[yellow]Open[/yellow] `sage shell` in another terminal — nested shell is disabled in TUI."
+        )
         return
     if getattr(ns, "command", None) == "tui":
         log.write("[dim]Already in TUI.[/dim]")
@@ -161,15 +163,19 @@ def run_tui_shell() -> None:
             with Vertical(id="main"):
                 yield RichLog(id="log", highlight=True, markup=True, auto_scroll=True)
                 yield Static("", id="comp")
-            yield Input(placeholder="› /commands · run \"…\" --auto · doctor · exit", id="inp")
+            yield Input(placeholder='› /commands · run "…" --auto · doctor · exit', id="inp")
             yield Footer()
 
         def on_mount(self) -> None:
             self.title = "SAGE"
             self.sub_title = "tui"
             log = self.query_one("#log", RichLog)
-            log.write("[bold #2dd4bf]SAGE[/] [dim]TUI ·[/dim] [yellow]/[/][dim] filters commands · Enter runs · Ctrl+Q quit[/dim]")
-            log.write("[dim]Install prompt_toolkit + run `sage` for the framed line shell with the same menu inline.[/dim]")
+            log.write(
+                "[bold #2dd4bf]SAGE[/] [dim]TUI ·[/dim] [yellow]/[/][dim] filters commands · Enter runs · Ctrl+Q quit[/dim]"
+            )
+            log.write(
+                "[dim]Install prompt_toolkit + run `sage` for the framed line shell with the same menu inline.[/dim]"
+            )
 
         def _update_comp(self, value: str) -> None:
             comp = self.query_one("#comp", Static)

@@ -94,8 +94,7 @@ def _default_doc_verification(description: str) -> str:
         "python -c \"from pathlib import Path; p=Path('%s'); "
         "assert p.is_file(), 'missing %s'; "
         "t=p.read_text(errors='ignore').strip(); "
-        "assert len(t)>40 and t.count(chr(10))>=1, '%s too thin'\""
-        % (target, target, target)
+        "assert len(t)>40 and t.count(chr(10))>=1, '%s too thin'\"" % (target, target, target)
     )
 
 

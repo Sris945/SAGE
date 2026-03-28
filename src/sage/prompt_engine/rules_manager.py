@@ -70,7 +70,9 @@ def validate_rule_layers(layers: list[RulesLayer]) -> list[str]:
     if re.search(r"\bnever use requests\b", combined_lower) and re.search(
         r"\b(always|must).*\brequests\b", combined_lower
     ):
-        warnings.append("Possible contradiction: 'never use requests' vs 'always/must ... requests'.")
+        warnings.append(
+            "Possible contradiction: 'never use requests' vs 'always/must ... requests'."
+        )
     if re.search(r"\balways use requests\b", combined_lower) and re.search(
         r"\bnever use requests\b", combined_lower
     ):
@@ -88,7 +90,9 @@ def validate_rule_layers(layers: list[RulesLayer]) -> list[str]:
         r"\b(api[_-]?key|secret|password|token)\s*[:=]\s*['\"][^'\"]{6,}['\"]",
         combined_lower,
     ):
-        warnings.append("Rule may embed literal secrets — prefer environment variables or secret stores.")
+        warnings.append(
+            "Rule may embed literal secrets — prefer environment variables or secret stores."
+        )
 
     if "chmod 777" in combined_lower:
         warnings.append("Rule mentions chmod 777 — overly permissive for typical projects.")
@@ -97,9 +101,15 @@ def validate_rule_layers(layers: list[RulesLayer]) -> list[str]:
         warnings.append("Rule may suggest skipping CI or tests — review carefully.")
 
     unsafe = (
-        ("ignore security", "Rule text mentions ignoring security — conflicts with SAGE safety posture."),
+        (
+            "ignore security",
+            "Rule text mentions ignoring security — conflicts with SAGE safety posture.",
+        ),
         ("disable ssl", "Rule may disable SSL verification — high risk."),
-        ("curl \\| bash", "Rule suggests curl|sh style installs — often disallowed by tool policy."),
+        (
+            "curl \\| bash",
+            "Rule suggests curl|sh style installs — often disallowed by tool policy.",
+        ),
         ("rm -rf /", "Destructive rm pattern mentioned in rules."),
     )
     for needle, msg in unsafe:

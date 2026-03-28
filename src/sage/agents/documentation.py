@@ -161,20 +161,13 @@ class DocumentationAgent:
             return {"status": "failed", "file": target, "error": str(e)}
 
         out_file = str(
-            data.get("file")
-            or data.get("path")
-            or data.get("filepath")
-            or target
+            data.get("file") or data.get("path") or data.get("filepath") or target
         ).lstrip("/\\")
         operation = str(data.get("operation", "create")).split("|")[0].strip().lower()
         if operation not in ("create", "edit"):
             operation = "create" if not Path(out_file).exists() else "edit"
         body = (
-            data.get("patch")
-            or data.get("content")
-            or data.get("body")
-            or data.get("value")
-            or ""
+            data.get("patch") or data.get("content") or data.get("body") or data.get("value") or ""
         )
         if not isinstance(body, str):
             body = json.dumps(body, indent=2) if body is not None else ""

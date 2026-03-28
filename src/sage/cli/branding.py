@@ -119,7 +119,7 @@ def print_shell_intro() -> bool:
             print("SAGE shell")
         print(
             "  Type / for the command menu (needs prompt_toolkit). "
-            "/commands · /help · /run \"…\" --auto · /exit"
+            '/commands · /help · /run "…" --auto · /exit'
         )
         print()
         return False

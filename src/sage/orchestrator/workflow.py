@@ -1104,7 +1104,9 @@ def execute_agent(state: SAGEState) -> SAGEState:
         }
 
     if task.assigned_agent == "documentation":
-        universal_prefix = build_prefix_for_agent(state, agent_role="documentation", task_id=task.id)
+        universal_prefix = build_prefix_for_agent(
+            state, agent_role="documentation", task_id=task.id
+        )
         task_complexity_score = float(getattr(task, "task_complexity_score", 0.0) or 0.0)
         doc_result = DocumentationAgent().run(
             task={

@@ -24,7 +24,9 @@ def test_validate_detects_requests_contradiction(tmp_path: Path) -> None:
     assert any("requests" in x.lower() for x in w)
 
 
-def test_load_merged_orders_global_before_project(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_load_merged_orders_global_before_project(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     home = tmp_path / "home"
     (home / ".sage").mkdir(parents=True)
     (home / ".sage" / "rules.md").write_text("GLOBAL", encoding="utf-8")
