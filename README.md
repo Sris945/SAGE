@@ -183,17 +183,21 @@ Full tree → **[`project_structure.md`](project_structure.md)**.
 
 ---
 
-## Star rating
 
 If SAGE fits your workflow, show support with a **star** on the repository — it helps others discover the project.
 
-<p align="center"><b>★ ★ ★ ★ ★</b><br/><sub>Community appreciation — not a formal score.</sub></p>
+## Star History
 
----
+<a href="https://www.star-history.com/?repos=S.A.G.E%2FS.A.G.E&type=date&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/image?repos=S.A.G.E/S.A.G.E&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/image?repos=S.A.G.E/S.A.G.E&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/image?repos=S.A.G.E/S.A.G.E&type=date&legend=top-left" />
+ </picture>
+</a>
 
-## Repository Activity
+If SAGE fits your workflow, show support with a **star** on the repository — it helps others discover the project.
 
-![SAGE Commit Activity](https://github-readme-stats.vercel.app/api/pin/?username=Sris945&repo=S.A.G.E)
 ---
 
 ## Contributing
