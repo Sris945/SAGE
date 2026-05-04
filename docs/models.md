@@ -6,26 +6,69 @@ SAGE does **not** require a single vendor model. You choose **primary** and **fa
 
 Ollama model names must match what you have locally — run `ollama list`. If the API returns **404 model not found**, the tag was never pulled (`ollama pull <name>`) or the name is wrong.
 
-## Recommended tiers (rough VRAM guide)
+## Why model choice matters more now
 
-These are **rules of thumb** for **single-GPU** local inference; CPU-only will be much slower. Use smaller primaries on limited hardware; keep **fallback** as a stronger model for hard tasks if it fits your VRAM.
+SAGE runs an **agentic ReAct tool-use loop** (Phase 1+). The coder agent now calls tools iteratively across many turns (`read_file → grep_code → edit_file → run_command → done`) instead of emitting a single-shot JSON patch. This requires:
 
-| Tier | Approx VRAM | Example roles | Notes |
-|------|-------------|---------------|--------|
-| Small | ~4–8 GB | planner/coder primary, reviewer | Fast iteration; may need fallback for hard bugs |
-| Medium | ~8–16 GB | coder fallback, debugger fallback | Good balance for many desktops |
-| Large | ~16–24+ GB | debugger primary (e.g. Codestral 22B), heavy codegen | Match tags to `ollama list` (e.g. `codestral:22b`) |
+- **Reliable JSON output** across multiple turns (not just once)
+- **Enough context** to hold a multi-turn conversation + codebase snippets
+- **Instruction following** fidelity under tool-call pressure
 
-Default repo settings evolve with `models.yaml`; treat this table as **documentation**, not a hard requirement.
+Small models (≤3B) will frequently hallucinate tool names or emit malformed JSON, causing the loop to exhaust its 24-turn budget. **14B+ is the practical floor for the coder role**.
+
+## Recommended models by VRAM tier
+
+| Tier | VRAM | Model | Best for |
+|------|------|-------|----------|
+| Minimum | ~8 GB | `qwen2.5-coder:7b` | planner, shell, docs |
+| Good | ~10 GB | `deepseek-coder-v2:16b-lite-base-q4_K_M` | coder primary on 12 GB GPU |
+| Recommended | ~12 GB | `qwen2.5-coder:14b-instruct-q4_K_M` | coder, reviewer, debugger |
+| Best offline | ~20 GB | `qwen2.5-coder:32b-instruct-q4_K_M` | coder/debugger on 24 GB GPU |
+| Strongest reasoning | ~28 GB | `deepseek-coder-v2:236b-instruct-q2_K` | CPU+GPU offload, slow but capable |
+
+### Pulling models
+
+```bash
+ollama pull qwen2.5-coder:7b
+ollama pull qwen2.5-coder:14b-instruct-q4_K_M
+ollama pull qwen2.5-coder:32b-instruct-q4_K_M
+# Optional: alternate strong coder
+ollama pull deepseek-coder-v2:16b-lite-base-q4_K_M
+```
+
+## Role guide
+
+| Role | Default primary | Why |
+|------|-----------------|-----|
+| `planner` | `qwen2.5-coder:7b` | Task decomposition; fast iteration preferred |
+| `architect` | `qwen2.5-coder:14b-instruct-q4_K_M` | Needs stronger reasoning for system design |
+| `coder` | `qwen2.5-coder:14b-instruct-q4_K_M` | Tool-use loop; 14B+ for JSON fidelity |
+| `debugger` | `qwen2.5-coder:32b-instruct-q4_K_M` | Hard bug analysis; use the biggest model that fits |
+| `reviewer` | `qwen2.5-coder:14b-instruct-q4_K_M` | Per-file + cross-file review; needs structured JSON output |
+| `test_engineer` | `qwen2.5-coder:14b-instruct-q4_K_M` | pytest generation; moderate load |
+| `documentation` | `qwen2.5-coder:7b` | Prose; small model fine |
+| `memory_optimizer` | `qwen2.5-coder:7b` | Session summarisation; light load |
+
+## Disabling the agentic loop
+
+Set `SAGE_TOOL_LOOP=0` to revert to the legacy single-shot PatchRequest mode (one file written per task, no iterative tool calls). Useful for debugging or for very small models that cannot handle multi-turn tool use:
+
+```bash
+SAGE_TOOL_LOOP=0 sage run "add logging to auth.py"
+```
 
 ## Internal vs user-chosen models
 
 - **Agent chat** (planner, architect, coder, debugger, …): **you** configure in `models.yaml`.
-- **Embeddings** (fix-pattern RAG, etc.): typically a **small** embedding model (e.g. `nomic-embed-text` in code paths that call Ollama embeddings). Swap only if you know the dimension constraints of your vector store path.
+- **Embeddings** (fix-pattern RAG, Qdrant code index): typically `nomic-embed-text`. Swap only if you know the dimension constraints of your vector store path.
+
+## Context window sizing
+
+SAGE's context compressor (`sage.memory.context_compressor`) limits codebase context injection to `MAX_CONTEXT_CHARS = 16 000` characters (~4K tokens). Combined with the tool-loop history this comfortably fits inside a 32K context window. If you use a model with a smaller context window (e.g. 8K), consider lowering `MAX_CONTEXT_CHARS` or `MAX_CHUNKS` in that file.
 
 ## Benchmarks and timeouts
 
-`sage bench` sets **`SAGE_BENCH=1`**, which scales Ollama client timeouts (see `sage.llm.ollama_safe.effective_ollama_timeout`). Override if needed:
+`sage bench` sets **`SAGE_BENCH=1`**, which scales Ollama client timeouts. Override if needed:
 
 | Variable | Meaning |
 |----------|---------|

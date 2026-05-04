@@ -1,65 +1,91 @@
 routing:
+  # ── Planner ────────────────────────────────────────────────────────────────
+  # Breaks the user request into a DAG of tasks. Needs instruction following
+  # but not heavy codegen. 7–14B models work well here.
   planner:
-    primary: "qwen2.5-coder:1.5b"
-    fallback: "qwen3:14b-q4_K_M"
+    primary: "qwen2.5-coder:7b"
+    fallback: "qwen2.5-coder:14b-instruct-q4_K_M"
     fallback_triggers:
       - task_complexity_score > 0.8
       - primary_failure_count >= 2
 
+  # ── Architect ──────────────────────────────────────────────────────────────
+  # Generates blueprints and system-design decisions. Medium reasoning load.
   architect:
-    primary: "qwen2.5-coder:1.5b"
-    fallback: "qwen3:14b-q4_K_M"
+    primary: "qwen2.5-coder:14b-instruct-q4_K_M"
+    fallback: "qwen2.5-coder:32b-instruct-q4_K_M"
     fallback_triggers:
       - task_complexity_score > 0.8
       - primary_failure_count >= 2
 
+  # ── Coder ──────────────────────────────────────────────────────────────────
+  # SAGE now runs an agentic ReAct tool-use loop (read→grep→edit→test→done).
+  # The model must reliably emit structured JSON tool calls across many turns.
+  #
+  # Tier recommendations (single-GPU VRAM):
+  #   ~8 GB  → qwen2.5-coder:7b                      (fast, adequate for simple tasks)
+  #   ~10 GB → deepseek-coder-v2:16b-lite-base-q4_K_M (strong code, good JSON fidelity)
+  #   ~12 GB → qwen2.5-coder:14b-instruct-q4_K_M     (best quality at <16 GB VRAM)
+  #   ~20 GB → qwen2.5-coder:32b-instruct-q4_K_M     (Claude-Code-class codegen offline)
+  #
+  # Set SAGE_TOOL_LOOP=0 to disable the loop and use legacy single-shot mode.
   coder:
-    primary: "qwen2.5-coder:1.5b"
-    fallback: "qwen2.5-coder:14b-instruct-q4_K_M"
+    primary: "qwen2.5-coder:14b-instruct-q4_K_M"
+    fallback: "qwen2.5-coder:32b-instruct-q4_K_M"
     fallback_triggers:
       - primary_failure_count >= 2
 
+  # ── Debugger ───────────────────────────────────────────────────────────────
+  # Generates targeted fix patches after verification failures. Needs strong
+  # reasoning about stack traces and test output. Use the largest model that fits.
   debugger:
-    # Match a tag that exists in `ollama list` (e.g. codestral:22b). :latest only works if pulled.
-    primary: "codestral:22b"
+    primary: "qwen2.5-coder:32b-instruct-q4_K_M"
     fallback: "qwen2.5-coder:14b-instruct-q4_K_M"
     fallback_triggers:
-      # If the primary model is missing/unreachable, we should fall back after
-      # the first failure to avoid retry loops during benchmarks.
+      # First failure → fallback immediately; avoids retry loops during bench.
       - primary_failure_count >= 1
 
+  # ── Reviewer ───────────────────────────────────────────────────────────────
+  # Per-file and cross-file code review. Must output structured JSON verdict.
+  # Also used by CrossFileReviewer — needs enough context to hold multi-file diff.
   reviewer:
-    primary: "qwen2.5-coder:1.5b"
-    fallback: "qwen2.5-coder:14b-instruct-q4_K_M"
+    primary: "qwen2.5-coder:14b-instruct-q4_K_M"
+    fallback: "qwen2.5-coder:32b-instruct-q4_K_M"
     fallback_triggers:
       - primary_failure_count >= 2
 
+  # ── Test engineer ──────────────────────────────────────────────────────────
   test_engineer:
-    primary: "qwen2.5-coder:1.5b"
-    fallback: "qwen2.5-coder:14b-instruct-q4_K_M"
+    primary: "qwen2.5-coder:14b-instruct-q4_K_M"
+    fallback: "qwen2.5-coder:32b-instruct-q4_K_M"
     fallback_triggers:
       - primary_failure_count >= 2
 
+  # ── Documentation ─────────────────────────────────────────────────────────
   documentation:
-    primary: "qwen2.5-coder:1.5b"
+    primary: "qwen2.5-coder:7b"
     fallback: "qwen2.5-coder:14b-instruct-q4_K_M"
     fallback_triggers:
       - primary_failure_count >= 2
 
+  # ── Memory optimizer ───────────────────────────────────────────────────────
+  # Summarises session journals and prunes stale fix-patterns. Light reasoning.
   memory_optimizer:
-    primary: "qwen3:14b-q4_K_M"
-    fallback: "claude-sonnet-4-5"
+    primary: "qwen2.5-coder:7b"
+    fallback: "qwen2.5-coder:14b-instruct-q4_K_M"
     fallback_triggers:
       - primary_failure_count >= 2
 
+  # ── Shell router / chat ────────────────────────────────────────────────────
+  # Very small, latency-sensitive slot; 7B is a safe floor.
   shell_router:
-    primary: "qwen2.5-coder:1.5b"
-    fallback: "qwen2.5-coder:1.5b"
+    primary: "qwen2.5-coder:7b"
+    fallback: "qwen2.5-coder:7b"
     fallback_triggers:
       - primary_failure_count >= 2
 
   shell_chat:
-    primary: "qwen2.5-coder:1.5b"
+    primary: "qwen2.5-coder:7b"
     fallback: "qwen2.5-coder:14b-instruct-q4_K_M"
     fallback_triggers:
       - primary_failure_count >= 2
