@@ -2293,6 +2293,26 @@ def debug_agent(state: SAGEState) -> SAGEState:
 
     task.retry_count = next_retry
 
+    # Debugger loop mode: files already written to disk — no tool_executor needed.
+    if debug_result.get("status") == "completed":
+        task.retry_count = next_retry
+        task.status = "running"
+        return {
+            **state,
+            "task_dag": graph.to_dict(),
+            "current_task": vars(task),
+            "pending_patch_request": {},
+            "pending_patch_source": "debugger_loop",
+            "pending_fix_pattern_context": {},
+            "fix_pattern_hit": False,
+            "fix_pattern_applied": True,  # triggers re-verification in task_worker
+            "last_error": "",
+            "execution_result": {
+                "status": "ok",
+                "file": (debug_result.get("files_edited") or debug_result.get("files_written") or [""])[0],
+            },
+        }
+
     if debug_result.get("status") == "patch_ready" and debug_result.get("patch_request"):
         pending_patch_request = debug_result["patch_request"]
 

@@ -24,6 +24,7 @@ Fix-pattern storage schema:
 
 import json
 import hashlib
+import os
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -40,6 +41,11 @@ from sage.protocol.schemas import PatchRequest
 from sage.protocol.schemas import AgentInsight
 from sage.execution.executor import ToolExecutionEngine
 from sage.llm.ollama_safe import chat_with_timeout, OllamaTimeout
+
+
+def _debug_loop_enabled() -> bool:
+    """Tool-use loop is on by default; set SAGE_TOOL_LOOP=0 to disable."""
+    return os.environ.get("SAGE_TOOL_LOOP", "1").strip() not in ("0", "false", "no")
 
 TEMPLATE_PATH = Path(__file__).parent.parent / "prompt_engine" / "templates" / "debugger.md"
 FIX_PATTERNS_PATH = Path("memory") / "fixes" / "error_patterns.json"
@@ -296,14 +302,19 @@ RULES:
         failure_count: int = 0,
         universal_prefix: str = "",
         insight_sink=None,
+        repo_root: str | None = None,
     ) -> dict:
         """
         Attempt to generate a fix patch for a failed task.
 
+        In loop mode (SAGE_TOOL_LOOP != 0) delegates to run_loop() which uses
+        the ReAct tool-use loop to iteratively read/grep/edit/test until fixed.
+
         Returns:
           {
-            "status": "patch_ready" | "failed",
-            "patch_request": {...},
+            "status": "completed" | "patch_ready" | "failed",
+            "patch_request": {...},          # only in patch_ready mode
+            "files_edited": [...],           # only in completed mode
             "file": str,
             "operation": str,
             "reason": str,
@@ -314,8 +325,185 @@ RULES:
             "error": str | None
           }
         """
+        if _debug_loop_enabled() and ollama is not None:
+            return self.run_loop(
+                task=task,
+                error=error,
+                failed_file=failed_file,
+                memory=memory or {},
+                failure_count=failure_count,
+                universal_prefix=universal_prefix,
+                insight_sink=insight_sink,
+                repo_root=repo_root,
+            )
 
-        # Small helper: emit AgentInsight packets if an orchestrator sink exists.
+        # Loop is disabled or ollama unavailable — use legacy single-shot path.
+        model = self.router.select(
+            "debugger",
+            task_complexity_score=float(task.get("task_complexity_score", 0.0) or 0.0),
+            failure_count=failure_count,
+        )
+        return self._run_single_shot(
+            task=task,
+            error=error,
+            failed_file=failed_file,
+            memory=memory,
+            failure_count=failure_count,
+            universal_prefix=universal_prefix,
+            insight_sink=insight_sink,
+            model=model,
+        )
+
+
+    def run_loop(
+        self,
+        task: dict,
+        error: str,
+        failed_file: str = "",
+        memory: dict | None = None,
+        failure_count: int = 0,
+        universal_prefix: str = "",
+        insight_sink=None,
+        repo_root: str | None = None,
+    ) -> dict:
+        """
+        ReAct tool-use loop for debugging.
+
+        Gives the model read/grep/edit/run tools so it can:
+          1. Read the failing file and its tests
+          2. Run the failing test command to see actual output
+          3. Make targeted surgical edits
+          4. Re-run tests to confirm the fix
+
+        Returns {"status": "completed", "files_edited": [...]} on success,
+        or delegates to legacy single-shot path on failure.
+        """
+        from sage.tools.tool_registry import ToolRegistry
+        from sage.execution.tool_loop import ToolLoopEngine, build_system_prompt
+
+        model = self.router.select(
+            "debugger",
+            task_complexity_score=float(task.get("task_complexity_score", 0.0) or 0.0),
+            failure_count=failure_count,
+        )
+        memory = memory or {}
+        root = Path(repo_root or Path.cwd()).resolve()
+
+        registry = ToolRegistry(workspace_roots=[root])
+
+        def _chat_fn(messages, options=None):
+            resp = chat_with_timeout(
+                model=model,
+                messages=messages,
+                options=options or {"temperature": 0.05},
+                timeout_s=None,
+            )
+            msg = resp.get("message") or {}
+            return msg.get("content", "") if isinstance(msg, dict) else str(msg)
+
+        debug_context = (
+            f"DEBUGGING CONTEXT\n"
+            f"=================\n"
+            f"Failed file: {failed_file or '(unknown)'}\n"
+            f"Error:\n{error or '(no error text)'}\n"
+            f"Task: {task.get('description', '')}\n\n"
+            f"Your goal: fix the error above. Use tools to:\n"
+            f"  1. Read the failing file\n"
+            f"  2. Run the test/command that produced the error\n"
+            f"  3. Make targeted edits to fix the root cause\n"
+            f"  4. Re-run to confirm the fix\n"
+            f"When the error is resolved, call done."
+        )
+
+        memory_context = "\n".join(
+            f"{k}: {v}" for k, v in (memory or {}).items()
+            if isinstance(v, str) and v.strip()
+        )
+        system = build_system_prompt(
+            task_description=task.get("description", ""),
+            memory_context=memory_context,
+            user_rules="",
+            registry=registry,
+            universal_prefix=universal_prefix,
+            extra_context=debug_context,
+        )
+
+        initial_user = (
+            f"Fix the following error in {failed_file or 'the codebase'}.\n\n"
+            f"ERROR:\n{(error or '')[:2000]}\n\n"
+            "Use the available tools to read files, run the failing test, "
+            "make surgical edits, and verify the fix. Call done when resolved."
+        )
+
+        print_agent_line("Debugger", f"[loop] model={model} root={root}")
+
+        engine = ToolLoopEngine(registry=registry, chat_fn=_chat_fn, model=model, max_turns=16)
+        loop_result = engine.run(system_prompt=system, task_description=initial_user)
+
+        if loop_result.success and (loop_result.files_edited or loop_result.files_written):
+            all_changed = loop_result.files_edited + loop_result.files_written
+            print_agent_line(
+                "Debugger",
+                f"[loop] fixed — edited {len(all_changed)} file(s) in {loop_result.turns} turns",
+            )
+            if insight_sink is not None:
+                try:
+                    insight_sink.ingest(
+                        AgentInsight(
+                            agent="debugger",
+                            task_id=str(task.get("id", "")),
+                            insight_type="observation",
+                            content=(
+                                f"Debug loop fixed error in {loop_result.turns} turns; "
+                                f"files: {all_changed}"
+                            )[:2000],
+                            severity="low",
+                            requires_orchestrator_action=False,
+                        )
+                    )
+                except Exception:
+                    pass
+            return {
+                "status": "completed",
+                "files_edited": loop_result.files_edited,
+                "files_written": loop_result.files_written,
+                "file": (loop_result.files_edited + loop_result.files_written or [""])[0],
+                "operation": "edit",
+                "reason": "debug loop resolved the error",
+                "suspected_cause": "see tool loop history",
+                "error_signature": _error_fingerprint(error),
+                "fix_generated": True,
+                "epistemic_flags": [],
+                "error": None,
+            }
+
+        # Loop didn't fix it — fall back to legacy single-shot
+        print_agent_line("Debugger", "[loop] could not fix — falling back to single-shot")
+        return self._run_single_shot(
+            task=task,
+            error=error,
+            failed_file=failed_file,
+            memory=memory,
+            failure_count=failure_count,
+            universal_prefix=universal_prefix,
+            insight_sink=insight_sink,
+            model=model,
+        )
+
+    def _run_single_shot(
+        self,
+        task: dict,
+        error: str,
+        failed_file: str = "",
+        memory: dict | None = None,
+        failure_count: int = 0,
+        universal_prefix: str = "",
+        insight_sink=None,
+        model: str = "",
+    ) -> dict:
+        """Legacy single-shot PatchRequest path (used as fallback when loop fails)."""
+        memory = memory or {}
+
         def _emit(
             insight_type: str,
             *,
@@ -341,8 +529,8 @@ RULES:
 
         agent_debug_log(
             hypothesis_id="H_debugger",
-            location="debugger.py:run",
-            message="debugger_invoked",
+            location="debugger.py:_run_single_shot",
+            message="debugger_single_shot_invoked",
             data={
                 "task_id": str(task.get("id", "")),
                 "failed_file": failed_file,
@@ -350,14 +538,13 @@ RULES:
             },
         )
 
-        model = self.router.select(
-            "debugger",
-            task_complexity_score=float(task.get("task_complexity_score", 0.0) or 0.0),
-            failure_count=failure_count,
-        )
-        memory = memory or {}
+        if not model:
+            model = self.router.select(
+                "debugger",
+                task_complexity_score=float(task.get("task_complexity_score", 0.0) or 0.0),
+                failure_count=failure_count,
+            )
 
-        # Build structured 4-phase prompt
         system = self._build_debug_prompt(
             task=task,
             error=error,
@@ -371,11 +558,7 @@ RULES:
         err_disp = (error or "").strip() or "(no error text — check reviewer/verify output)"
         print_agent_line("Debugger", f"Error: {err_disp[:200]}")
 
-        _emit(
-            "decision",
-            severity="low",
-            content=f"Debugger selected model={model} for error fix.",
-        )
+        _emit("decision", severity="low", content=f"Debugger selected model={model} for error fix.")
 
         if ollama is None:
             _emit(
@@ -384,11 +567,10 @@ RULES:
                 content="ollama module not available; cannot generate PatchRequest.",
                 requires_orchestrator_action=True,
             )
-            err = "ollama module not available"
             return {
                 "status": "failed",
                 "file": failed_file,
-                "error": err,
+                "error": "ollama module not available",
                 "suspected_cause": "dependency_missing",
                 "fix_generated": False,
                 "error_signature": _error_fingerprint(error),
@@ -436,16 +618,13 @@ RULES:
 
         try:
             raw_data = parse_patch_json(raw)
-            # Handle 4-phase structured output: extract phase_4_patch as the patch dict
             if isinstance(raw_data, dict) and "phase_4_patch" in raw_data:
                 phase4 = raw_data["phase_4_patch"]
-                # Enrich with suspected_cause from phase_3 if available
                 phase3 = raw_data.get("phase_3_hypothesize", {})
                 if "suspected_cause" not in phase4 and phase3.get("most_likely_cause"):
                     confidence = phase3.get("confidence", 0.8)
                     phase4["suspected_cause"] = f"{phase3['most_likely_cause']} ({confidence:.2f})"
                 data = _normalise_data(phase4)
-                # Store full 4-phase analysis for observability
                 debug_phases = {k: v for k, v in raw_data.items() if k.startswith("phase_")}
             else:
                 data = _normalise_data(raw_data)
@@ -472,12 +651,7 @@ RULES:
         if not str(patch_req.patch or "").strip():
             err = "debugger model returned empty patch"
             print_agent_line("Debugger", err)
-            _emit(
-                "risk",
-                severity="high",
-                content=err,
-                requires_orchestrator_action=True,
-            )
+            _emit("risk", severity="high", content=err, requires_orchestrator_action=True)
             return {
                 "status": "failed",
                 "file": failed_file,
@@ -492,7 +666,6 @@ RULES:
         print_agent_line("Debugger", f"Fix generated → {patch_req.file} ({patch_req.operation})")
         print_agent_line("Debugger", f"Suspected cause: {suspected_cause or 'unknown'}")
 
-        # Emit 4-phase reasoning summary if available
         if debug_phases:
             phase3 = debug_phases.get("phase_3_hypothesize", {})
             confidence = phase3.get("confidence", 0.0)
@@ -512,13 +685,9 @@ RULES:
             ),
         )
 
-        # Record learned pattern (best-effort — never crashes caller)
         self._record_debug_pattern(
             error_text=error,
-            patch_request={
-                **vars(patch_req),
-                "suspected_cause": suspected_cause,
-            },
+            patch_request={**vars(patch_req), "suspected_cause": suspected_cause},
             task_id=str(task.get("id", "")),
         )
 
