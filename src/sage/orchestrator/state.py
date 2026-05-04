@@ -55,6 +55,7 @@ class SAGEState(TypedDict):
     clarify: NotRequired[bool]  # planner Q&A; False with --no-clarify / silent
     token_usage: NotRequired[dict]  # accumulated per-session token counts
     model_override: NotRequired[str]  # fallback model set on overload
+    cross_file_review_result: NotRequired[dict]  # CrossFileReviewResult serialised
 
 
 # Optional fields used at runtime but not declared on TypedDict (backward compat).

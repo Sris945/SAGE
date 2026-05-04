@@ -2561,6 +2561,93 @@ def save_memory(state: SAGEState) -> SAGEState:
     return {**state, "session_memory": new_state}
 
 
+def cross_file_review(state: SAGEState) -> SAGEState:
+    """
+    Post-DAG cross-file consistency review.
+
+    Collects every artifact file written during this session and sends them
+    together to CrossFileReviewer.  Issues are stored in the state and logged;
+    critical issues are reported but do NOT block save_memory (graceful
+    degradation).  Skipped in --silent mode or when ollama is unavailable.
+    """
+    mode = state.get("mode", "auto")
+    if mode == "silent":
+        return state
+
+    artifacts_by_task: dict = state.get("artifacts_by_task") or {}
+    changed_files = list(artifacts_by_task.values())
+
+    task_dag = state.get("task_dag") or {}
+    task_nodes: list[dict] = task_dag.get("nodes") or []
+    task_descriptions = [n.get("description", "") for n in task_nodes if n.get("description")]
+
+    insight_sink = state.get("insight_feed")
+
+    try:
+        from sage.agents.cross_file_reviewer import CrossFileReviewer
+
+        repo_root = state.get("repo_path") or None
+        result = CrossFileReviewer().run(
+            changed_files=changed_files,
+            repo_root=repo_root,
+            task_descriptions=task_descriptions,
+            insight_sink=insight_sink,
+        )
+
+        summary = result.summary()
+        try:
+            from sage.cli.branding import get_console
+
+            console = get_console()
+            if result.skipped:
+                console.print(f"[muted]{summary}[/muted]")
+            elif result.passed:
+                console.print(f"[green]{summary}[/green]")
+            else:
+                console.print(f"[bold red]{summary}[/bold red]")
+                for issue in result.issues:
+                    sev = issue.severity.upper()
+                    console.print(
+                        f"  [{sev}] {issue.description} "
+                        f"(files: {', '.join(issue.files_involved)})"
+                    )
+        except Exception:
+            print(f"[CrossFileReview] {summary}")
+
+        result_dict = {
+            "passed": result.passed,
+            "skipped": result.skipped,
+            "skip_reason": result.skip_reason,
+            "model_used": result.model_used,
+            "files_reviewed": result.files_reviewed,
+            "issues": [
+                {
+                    "severity": i.severity,
+                    "description": i.description,
+                    "files_involved": i.files_involved,
+                    "suggestion": i.suggestion,
+                }
+                for i in result.issues
+            ],
+        }
+        try:
+            from sage.memory.manager import MemoryManager
+
+            MemoryManager().append_session_log(
+                f"[CrossFileReview] {summary}"
+            )
+        except Exception:
+            pass
+
+        return {**state, "cross_file_review_result": result_dict}
+
+    except Exception as exc:
+        import logging as _logging
+
+        _logging.getLogger(__name__).warning("cross_file_review node failed: %s", exc)
+        return state
+
+
 # ── Graph assembly ────────────────────────────────────────────────────────────
 
 
@@ -2584,6 +2671,7 @@ def build_workflow():
     workflow.add_node("task_worker", task_worker)
     workflow.add_node("merge_task_updates", merge_task_updates)
 
+    workflow.add_node("cross_file_review", cross_file_review)
     workflow.add_node("save_memory", save_memory)
 
     workflow.set_entry_point("load_memory")
@@ -2634,7 +2722,7 @@ def build_workflow():
                 and not s.get("human_checkpoint_done", False)
             )
             else (
-                "save_memory"
+                "cross_file_review"
                 if _rebuild_task_graph(s.get("task_dag", {})).all_done()
                 else (
                     "human_checkpoint"
@@ -2648,7 +2736,7 @@ def build_workflow():
         {
             "human_checkpoint": "human_checkpoint",
             "parallel_dispatch": "parallel_dispatch",
-            "save_memory": "save_memory",
+            "cross_file_review": "cross_file_review",
         },
     )
 
@@ -2679,19 +2767,20 @@ def build_workflow():
                 and not s.get("human_checkpoint_done", False)
             ):
                 return "human_checkpoint"
-            return "save_memory"
+            return "cross_file_review"
         return "scheduler_batch"
 
     workflow.add_conditional_edges(
         "merge_task_updates",
         _continue_or_stop,
         {
-            "save_memory": "save_memory",
+            "cross_file_review": "cross_file_review",
             "scheduler_batch": "scheduler_batch",
             "human_checkpoint": "human_checkpoint",
         },
     )
 
+    workflow.add_edge("cross_file_review", "save_memory")
     workflow.add_edge("save_memory", END)
     return workflow.compile()
 
@@ -2744,6 +2833,7 @@ else:  # pragma: no cover
                 self._last_graph_state = copy.deepcopy(dict(s))
                 graph = _rebuild_task_graph(s.get("task_dag", {}))
                 if graph.all_done():
+                    s = cross_file_review(s)
                     return save_memory(s)
 
                 ready = graph.get_ready_tasks()
@@ -2753,6 +2843,7 @@ else:  # pragma: no cover
                         if n.status == "pending":
                             n.status = "blocked"
                     s["task_dag"] = graph.to_dict()
+                    s = cross_file_review(s)
                     return save_memory(s)
 
                 selected = ready[:MAX_PARALLEL]
