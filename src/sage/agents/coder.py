@@ -2,26 +2,36 @@
 SAGE Coder Agent
 ----------------
 Input:  TaskNode dict
-Output: PatchRequest (written to disk via ToolExecutionEngine)
+Output: LoopResult (agentic tool-use loop) OR PatchRequest (legacy single-shot)
 
 Primary model: qwen2.5-coder:14b-instruct-q4_K_M
 Fallback:      gpt-4o
 
-TDD discipline (enforced by template):
+Mode selection:
+  - SAGE_TOOL_LOOP=1 (default): agentic ReAct loop — read→grep→edit→test→fix→done
+  - SAGE_TOOL_LOOP=0: legacy single-shot PatchRequest (backward compat)
+
+TDD discipline (enforced by template + loop instructions):
+- Read the file before editing it
 - Write failing test FIRST
 - Then minimal code to pass
-- Any code written before a test is deleted on review
+- Run pytest and fix failures before calling done
 
-Pipeline:
+Pipeline (loop mode):
+  1. Build system prompt with tool catalogue + task context
+  2. Agentic loop: model emits tool calls, engine executes, feeds results back
+  3. Model calls {"tool": "done"} when finished
+  4. Return LoopResult (tracks all writes, edits, commands)
+
+Pipeline (legacy mode):
   1. Load coder.md template
   2. Inject task + memory + user rules context
   3. Call Ollama → get JSON PatchRequest
-  4. Validate schema
-  5. Route to ToolExecutionEngine → file written to disk
-  6. Return result dict
+  4. Validate schema → return patch_ready result
 """
 
 import json
+import os
 from pathlib import Path
 
 try:
@@ -37,6 +47,12 @@ from sage.protocol.schemas import PatchRequest
 from sage.protocol.schemas import AgentInsight
 from sage.llm.ollama_safe import chat_with_timeout, OllamaTimeout
 from sage.rl.ucb_bandit import get_global_bandit
+
+
+def _tool_loop_enabled() -> bool:
+    """Return True unless SAGE_TOOL_LOOP=0 explicitly disables it."""
+    val = os.environ.get("SAGE_TOOL_LOOP", "1").strip().lower()
+    return val not in ("0", "false", "no", "off")
 
 TEMPLATE_PATH = Path(__file__).parent.parent / "prompt_engine" / "templates" / "coder.md"
 PROJECT_RULES_PATH = Path(".sage") / "rules.md"
@@ -120,8 +136,6 @@ class CoderAgent:
     def __init__(self):
         self.router = ModelRouter()
         self.template = _load_template()
-        # NOTE: ToolExecutionEngine is used by `tool_executor` in the workflow.
-        # The coder agent must only emit PatchRequest objects.
 
     # ── Private helpers ──────────────────────────────────────────────────────
 
@@ -254,6 +268,137 @@ class CoderAgent:
             "list above and reuse existing ones instead of reimplementing."
         )
 
+    # ── Agentic loop mode ────────────────────────────────────────────────────
+
+    def run_loop(
+        self,
+        task: dict,
+        memory: dict,
+        model: str,
+        temperature: float = 0.05,
+        universal_prefix: str = "",
+        insight_sink=None,
+        max_turns: int = 24,
+    ) -> dict:
+        """
+        Agentic tool-use loop mode.  The model calls tools (read, grep, edit,
+        run_command …) iteratively until it emits {"tool": "done"}.
+
+        Returns the same dict shape as run() for pipeline compatibility.
+        """
+        from sage.tools.tool_registry import ToolRegistry
+        from sage.execution.tool_loop import ToolLoopEngine, build_system_prompt, make_ollama_chat_fn
+
+        if ollama is None:
+            if insight_sink is not None:
+                try:
+                    insight_sink.ingest(AgentInsight(
+                        agent="coder",
+                        task_id=str(task.get("id", "")),
+                        insight_type="risk",
+                        content="ollama module not available; cannot run tool loop.",
+                        severity="high",
+                        requires_orchestrator_action=True,
+                    ))
+                except Exception:
+                    pass
+            return {
+                "status": "failed", "file": "", "operation": "", "reason": "",
+                "error": "ollama module not available",
+            }
+
+        user_rules = _load_user_rules()
+        session_memory: dict = (
+            memory.get("session_memory")
+            if isinstance(memory.get("session_memory"), dict)
+            else memory
+        )
+        memory_ctx = json.dumps(
+            {k: v for k, v in session_memory.items()
+             if k in ("codebase_brief", "sage_memory_summary", "project", "conventions")},
+            indent=2,
+        )
+        extra_ctx = self._build_conventions_context(session_memory) + \
+                    self._build_symbols_context(session_memory)
+
+        registry = ToolRegistry()
+        system_prompt = build_system_prompt(
+            task_description=task.get("description", ""),
+            memory_context=memory_ctx,
+            user_rules=user_rules,
+            registry=registry,
+            universal_prefix=universal_prefix,
+            extra_context=extra_ctx,
+        )
+
+        # Use module-level chat_with_timeout so test patches apply correctly
+        def _coder_chat_fn(messages: list[dict], model: str, options: dict) -> str:
+            response = chat_with_timeout(
+                model=model,
+                messages=messages,
+                options=options,
+                timeout_s=None,
+            )
+            if isinstance(response, dict):
+                msg = response.get("message") or {}
+                if isinstance(msg, dict):
+                    return str(msg.get("content") or "")
+                return str(msg)
+            return str(response)
+
+        engine = ToolLoopEngine(
+            registry=registry,
+            chat_fn=_coder_chat_fn,
+            model=model,
+            max_turns=max_turns,
+            temperature=temperature,
+        )
+
+        print_agent_line("Coder", f"[loop] model={model} max_turns={max_turns}")
+        print_agent_line("Coder", f"Task: {task.get('description', '')[:80]}")
+
+        loop_result = engine.run(
+            system_prompt=system_prompt,
+            task_description=task.get("description", ""),
+            insight_sink=insight_sink,
+        )
+
+        # Summarise what changed for the workflow
+        all_files = loop_result.files_written + loop_result.files_edited
+        primary_file = all_files[0] if all_files else ""
+
+        if loop_result.success:
+            print_agent_line(
+                "Coder",
+                f"[loop] done in {loop_result.turns} turns — "
+                f"{len(all_files)} file(s) changed",
+            )
+            return {
+                "status": "completed",
+                "file": primary_file,
+                "operation": "tool_loop",
+                "reason": loop_result.final_summary,
+                "error": None,
+                "model_used": model,
+                "files_written": loop_result.files_written,
+                "files_edited": loop_result.files_edited,
+                "commands_run": loop_result.commands_run,
+                "turns": loop_result.turns,
+            }
+        else:
+            print_agent_line("Coder", f"[loop] {loop_result.status}: {loop_result.error[:120]}")
+            return {
+                "status": "failed",
+                "file": primary_file,
+                "operation": "tool_loop",
+                "reason": loop_result.error,
+                "error": loop_result.error,
+                "model_used": model,
+                "turns": loop_result.turns,
+            }
+
+    # ── Main entry point ─────────────────────────────────────────────────────
+
     def run(
         self,
         task: dict,
@@ -264,9 +409,13 @@ class CoderAgent:
         insight_sink=None,
     ) -> dict:
         """
-        Execute a coding task. Returns:
+        Execute a coding task.
+
+        Dispatches to run_loop() (agentic tool-use) unless SAGE_TOOL_LOOP=0.
+
+        Returns:
         {
-          "status": "completed" | "failed",
+          "status": "completed" | "failed" | "patch_ready",
           "file": str,
           "operation": str,
           "reason": str,
@@ -359,6 +508,17 @@ class CoderAgent:
                 f"model={model}, temperature={temperature:.2f}"
             ),
         )
+
+        # ── Dispatch to agentic tool-use loop (default) ───────────────────────
+        if _tool_loop_enabled():
+            return self.run_loop(
+                task=task,
+                memory=memory,
+                model=model,
+                temperature=temperature,
+                universal_prefix=universal_prefix,
+                insight_sink=insight_sink,
+            )
 
         # ── Build context-enriched prompt ─────────────────────────────────────
         # session_memory may be nested under memory["session_memory"] or be memory itself

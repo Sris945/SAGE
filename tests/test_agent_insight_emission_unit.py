@@ -16,6 +16,7 @@ class TestAgentInsightEmission(unittest.TestCase):
         with (
             patch("sage.agents.coder.get_global_bandit", return_value=mock_bandit),
             patch("sage.agents.coder.ollama", object()),
+            patch("sage.agents.coder._tool_loop_enabled", return_value=False),
             patch(
                 "sage.agents.coder.chat_with_timeout",
                 return_value={

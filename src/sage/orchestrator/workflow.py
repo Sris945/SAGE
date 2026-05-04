@@ -1310,7 +1310,36 @@ def execute_agent(state: SAGEState) -> SAGEState:
             insight_sink=insight_sink,
         )
 
-        if coder_result.get("status") != "patch_ready":
+        coder_status = coder_result.get("status", "")
+        task.model_used = coder_result.get("model_used", "") or ""
+        task.strategy_key = coder_result.get("strategy_key", "") or ""
+
+        # ── Agentic loop result (tool-use mode) ───────────────────────────────
+        # The loop ran to completion inside CoderAgent; files are already on disk.
+        # Skip tool_executor and mark the task complete directly.
+        if coder_status == "completed":
+            primary_file = coder_result.get("file", "")
+            artifacts_by_task = state.get("artifacts_by_task") or {}
+            if primary_file:
+                artifacts_by_task = {**artifacts_by_task, task.id: primary_file}
+            task.status = "completed"
+            state["verification_passed"] = True
+            return {
+                **state,
+                "task_dag": graph.to_dict(),
+                "current_task": vars(task),
+                "artifacts_by_task": artifacts_by_task,
+                "execution_result": {"status": "ok", "file": primary_file},
+                "last_error": "",
+                "fix_pattern_hit": False,
+                "fix_pattern_applied": False,
+                "pending_patch_request": {},
+                "pending_patch_source": "tool_loop",
+                "pending_fix_pattern_context": {},
+            }
+
+        # ── Legacy single-shot mode (PatchRequest) ────────────────────────────
+        if coder_status != "patch_ready":
             error = coder_result.get("error") or coder_result.get("reason") or "coder failed"
             task.status = "failed"
             state["last_error"] = str(error)
@@ -1328,8 +1357,6 @@ def execute_agent(state: SAGEState) -> SAGEState:
 
         pending_patch_request = coder_result.get("patch_request") or {}
         pending_patch_source = "coder"
-        task.model_used = coder_result.get("model_used", "") or ""
-        task.strategy_key = coder_result.get("strategy_key", "") or ""
         task.status = "running"
 
         return {

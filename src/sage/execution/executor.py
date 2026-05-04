@@ -73,6 +73,8 @@ class ToolExecutionEngine:
         self._safety_check(req)
         if req.operation in ("edit", "create", "delete"):
             out = self._filesystem_handler(req)
+        elif req.operation == "surgical_edit":
+            out = self._surgical_edit_handler(req)
         elif req.operation == "run_command":
             out = self._terminal_handler(req)
         elif req.operation in self._GIT_OPS:
@@ -160,6 +162,59 @@ class ToolExecutionEngine:
                 lock.release()
         # Should never reach here — execute() validates operation first
         raise ValueError(f"Unhandled filesystem operation: {req.operation}")
+
+    def _surgical_edit_handler(self, req: PatchRequest) -> dict:
+        """
+        Surgical old→new replacement.
+
+        req.patch must be a JSON string: {"old_string": "...", "new_string": "..."}
+        Falls through to _filesystem_handler for create if the file doesn't exist.
+        """
+        import json as _json
+
+        path = Path(req.file)
+        if not path_is_under_workspace(path, self._workspace_roots):
+            return {
+                "status": "error",
+                "operation": "surgical_edit",
+                "file": str(path),
+                "error": "path outside allowed workspace roots",
+            }
+        try:
+            edit_spec = _json.loads(req.patch or "{}")
+        except _json.JSONDecodeError as exc:
+            return {"status": "error", "operation": "surgical_edit", "file": str(path),
+                    "error": f"patch is not valid JSON: {exc}"}
+
+        old_string = edit_spec.get("old_string", "")
+        new_string = edit_spec.get("new_string", "")
+
+        if not old_string:
+            return {"status": "error", "operation": "surgical_edit", "file": str(path),
+                    "error": "old_string is empty"}
+        if not path.is_file():
+            return {"status": "error", "operation": "surgical_edit", "file": str(path),
+                    "error": "file does not exist — use 'create' instead"}
+
+        lock = _get_lock_for_path(path)
+        acquired = lock.acquire(timeout=self.LOCK_TIMEOUT_SECONDS)
+        if not acquired:
+            return {"status": "blocked", "operation": "surgical_edit", "file": str(path),
+                    "reason": "file lock busy"}
+        try:
+            original = path.read_text(encoding="utf-8", errors="replace")
+            count = original.count(old_string)
+            if count == 0:
+                return {"status": "error", "operation": "surgical_edit", "file": str(path),
+                        "error": "old_string not found in file"}
+            if count > 1:
+                return {"status": "error", "operation": "surgical_edit", "file": str(path),
+                        "error": f"old_string matches {count} locations — must be unique"}
+            new_content = original.replace(old_string, new_string, 1)
+            path.write_text(new_content, encoding="utf-8")
+            return {"status": "ok", "operation": "surgical_edit", "file": str(path)}
+        finally:
+            lock.release()
 
     def _is_destructive(self, req: PatchRequest) -> bool:
         """Returns True if this operation is destructive and needs pre-confirmation."""

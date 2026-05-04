@@ -42,8 +42,9 @@ class TaskResult:
 @dataclass
 class PatchRequest:
     file: str
-    operation: Literal["edit", "create", "delete", "run_command"]
-    patch: str  # unified diff or full content or command string
+    operation: Literal["edit", "create", "delete", "run_command", "surgical_edit",
+                        "git_commit", "git_diff", "git_log", "git_branch", "git_status"]
+    patch: str  # full content, command string, or JSON {"old_string": ..., "new_string": ...}
     reason: str
     epistemic_flags: list[str] = field(default_factory=list)
 
