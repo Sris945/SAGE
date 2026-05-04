@@ -215,6 +215,26 @@ class ToolRegistry:
             args_schema={"path": "optional file path (string or empty for all)"},
             handler=self._git_diff,
         ))
+        self._register(ToolDescriptor(
+            name="git_add",
+            description=(
+                "Stage files for a git commit. Use before git_commit. "
+                "Pass a list of paths or '.' to stage all changes."
+            ),
+            args_schema={"paths": "list of file paths to stage, or '.' for all (string or list)"},
+            handler=self._git_add,
+        ))
+        self._register(ToolDescriptor(
+            name="git_commit",
+            description=(
+                "Create a git commit with the staged changes. "
+                "Stage files first with git_add. "
+                "Only use when the user's goal explicitly involves committing code."
+            ),
+            args_schema={"message": "commit message (string)"},
+            handler=self._git_commit,
+            dangerous=False,
+        ))
 
     # ── Handlers ─────────────────────────────────────────────────────────────
 
@@ -441,6 +461,46 @@ class ToolRegistry:
             return ToolResult("git_diff", True, out)
         except OSError as exc:
             return ToolResult("git_diff", False, "", str(exc))
+
+    def _git_add(self, paths: "str | list[str]" = ".") -> ToolResult:
+        cwd = str(next(iter(self._roots), Path.cwd()))
+        if isinstance(paths, str):
+            paths = [paths]
+        resolved: list[str] = []
+        for p in paths:
+            if p.strip() == ".":
+                resolved.append(".")
+            else:
+                rp = self._resolve(p)
+                if rp is None:
+                    return ToolResult("git_add", False, "", f"Path outside workspace: {p}")
+                resolved.append(str(rp))
+        try:
+            r = subprocess.run(
+                ["git", "add"] + resolved,
+                capture_output=True, text=True, timeout=15, cwd=cwd,
+            )
+            if r.returncode != 0:
+                return ToolResult("git_add", False, r.stdout, r.stderr.strip())
+            return ToolResult("git_add", True, f"Staged: {', '.join(resolved)}")
+        except OSError as exc:
+            return ToolResult("git_add", False, "", str(exc))
+
+    def _git_commit(self, message: str) -> ToolResult:
+        if not message or not message.strip():
+            return ToolResult("git_commit", False, "", "Commit message must not be empty")
+        cwd = str(next(iter(self._roots), Path.cwd()))
+        try:
+            r = subprocess.run(
+                ["git", "commit", "-m", message.strip()],
+                capture_output=True, text=True, timeout=30, cwd=cwd,
+            )
+            out = (r.stdout + r.stderr).strip()
+            if r.returncode != 0:
+                return ToolResult("git_commit", False, out, f"exit {r.returncode}")
+            return ToolResult("git_commit", True, out)
+        except OSError as exc:
+            return ToolResult("git_commit", False, "", str(exc))
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
