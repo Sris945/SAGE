@@ -75,6 +75,7 @@ class ToolRegistry:
             else (Path.cwd().resolve(),)
         )
         self._tools: dict[str, ToolDescriptor] = {}
+        self._todos: list[dict] = []
         self._register_all()
 
     # ── Public ────────────────────────────────────────────────────────────────
@@ -234,6 +235,42 @@ class ToolRegistry:
             args_schema={"message": "commit message (string)"},
             handler=self._git_commit,
             dangerous=False,
+        ))
+        self._register(ToolDescriptor(
+            name="search_replace",
+            description=(
+                "Replace ALL occurrences of an exact string across multiple files matching "
+                "a glob pattern. Useful for renaming a function, variable, or import site-wide. "
+                "Returns count of replacements made and files changed."
+            ),
+            args_schema={
+                "old_string": "exact text to replace (case-sensitive)",
+                "new_string": "replacement text",
+                "pattern": "file glob (e.g. '**/*.py', default '**/*.py')",
+                "root": "search root directory (default '.')",
+            },
+            handler=self._search_replace,
+        ))
+        self._register(ToolDescriptor(
+            name="todo_write",
+            description=(
+                "Write your task plan as a list of todo items. Call at the start of a task "
+                "to break it into steps. Each item has a status: pending|in_progress|done. "
+                "Call again to update statuses as you complete steps."
+            ),
+            args_schema={
+                "todos": (
+                    "list of objects: [{\"id\": \"1\", \"text\": \"step description\", "
+                    "\"status\": \"pending\"}]"
+                ),
+            },
+            handler=self._todo_write,
+        ))
+        self._register(ToolDescriptor(
+            name="todo_read",
+            description="Read the current todo list for this task.",
+            args_schema={},
+            handler=self._todo_read,
         ))
 
     # ── Handlers ─────────────────────────────────────────────────────────────
@@ -502,6 +539,66 @@ class ToolRegistry:
         except OSError as exc:
             return ToolResult("git_commit", False, "", str(exc))
 
+    def _search_replace(
+        self,
+        old_string: str,
+        new_string: str,
+        pattern: str = "**/*.py",
+        root: str = ".",
+    ) -> ToolResult:
+        if not old_string:
+            return ToolResult("search_replace", False, "", "old_string must not be empty")
+        base = Path(root).resolve() if root != "." else self._roots[0]
+        if not path_is_under_workspace(base, self._roots):
+            return ToolResult("search_replace", False, "", f"root outside workspace: {root}")
+        replacements = 0
+        changed_files: list[str] = []
+        for path in sorted(base.rglob(pattern.lstrip("/"))):
+            if not path.is_file():
+                continue
+            if not path_is_under_workspace(path, self._roots):
+                continue
+            try:
+                original = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+            count = original.count(old_string)
+            if count == 0:
+                continue
+            path.write_text(original.replace(old_string, new_string), encoding="utf-8")
+            replacements += count
+            changed_files.append(str(path.relative_to(base)))
+        if replacements == 0:
+            return ToolResult("search_replace", True, "0 replacements — string not found")
+        summary = (
+            f"{replacements} replacement(s) in {len(changed_files)} file(s):\n"
+            + "\n".join(f"  {f}" for f in changed_files)
+        )
+        return ToolResult("search_replace", True, summary)
+
+    def _todo_write(self, todos: list) -> ToolResult:
+        if not isinstance(todos, list):
+            return ToolResult("todo_write", False, "", "todos must be a list")
+        validated: list[dict] = []
+        for item in todos:
+            if not isinstance(item, dict):
+                return ToolResult("todo_write", False, "", f"each todo must be an object, got {type(item)}")
+            tid = str(item.get("id", len(validated) + 1))
+            text = str(item.get("text", "")).strip()
+            status = str(item.get("status", "pending"))
+            if status not in {"pending", "in_progress", "done"}:
+                status = "pending"
+            validated.append({"id": tid, "text": text, "status": status})
+        self._todos = validated
+        lines = [_fmt_todo(t) for t in self._todos]
+        return ToolResult("todo_write", True, "Todo list updated:\n" + "\n".join(lines))
+
+    def _todo_read(self) -> ToolResult:
+        if not self._todos:
+            return ToolResult("todo_read", True, "(no todos yet)")
+        lines = [_fmt_todo(t) for t in self._todos]
+        return ToolResult("todo_read", True, "\n".join(lines))
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -539,3 +636,9 @@ def _find_occurrence_contexts(text: str, substring: str) -> list[int]:
         if len(result) >= 10:
             break
     return result
+
+
+def _fmt_todo(todo: dict) -> str:
+    icons = {"done": "[x]", "in_progress": "[~]", "pending": "[ ]"}
+    icon = icons.get(todo.get("status", "pending"), "[ ]")
+    return f"{icon} {todo.get('id', '?')}. {todo.get('text', '')}"

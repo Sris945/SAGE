@@ -251,6 +251,7 @@ class ToolLoopEngine:
             result_msg = tool_result.to_message()
             messages.append({"role": "user", "content": result_msg})
 
+            _stream_turn(turn, self.max_turns, tool_name, tool_call.get("args", {}), tool_result)
             logger.debug(
                 "Tool loop turn %d/%d: %s → %s",
                 turn, self.max_turns, tool_name,
@@ -283,6 +284,26 @@ def _parse_tool_call(raw: str) -> tuple[dict, str]:
         return val, ""
     except (ValueError, json.JSONDecodeError) as exc:
         return {}, str(exc)
+
+
+def _stream_turn(
+    turn: int,
+    max_turns: int,
+    tool_name: str,
+    args: dict,
+    result: ToolResult,
+) -> None:
+    """Print a one-line update per tool call so users see real-time progress."""
+    # Pick the most informative single argument to surface
+    _ARG_PRIORITY = ("path", "command", "query", "pattern", "old_string", "message")
+    key_arg = ""
+    for k in _ARG_PRIORITY:
+        if k in args:
+            val = str(args[k])
+            key_arg = f" {val[:60]}" if val else ""
+            break
+    status = "ok" if result.success else f"ERROR: {result.error[:50]}"
+    print(f"  [{turn:02d}/{max_turns}] {tool_name}{key_arg} → {status}", flush=True)
 
 
 def _emit_insight(sink: Any, insight_type: str, severity: str, content: str, requires_action: bool) -> None:

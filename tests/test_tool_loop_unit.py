@@ -17,9 +17,11 @@ from sage.execution.tool_loop import (
     ToolLoopEngine,
     LoopResult,
     _parse_tool_call,
+    _stream_turn,
     build_system_prompt,
     make_ollama_chat_fn,
 )
+from sage.tools.tool_registry import ToolResult
 from sage.tools.tool_registry import ToolRegistry
 
 
@@ -308,3 +310,52 @@ class TestLoopResult:
     def test_not_success_when_error(self):
         r = LoopResult(status="error", turns=1)
         assert r.success is False
+
+
+# ── _stream_turn ──────────────────────────────────────────────────────────────
+
+class TestStreamTurn:
+    def test_ok_tool_prints_line(self, capsys):
+        result = ToolResult(tool="read_file", success=True, output="contents")
+        _stream_turn(1, 24, "read_file", {"path": "src/main.py"}, result)
+        captured = capsys.readouterr()
+        assert "[01/24]" in captured.out
+        assert "read_file" in captured.out
+        assert "src/main.py" in captured.out
+        assert "ok" in captured.out
+
+    def test_error_tool_prints_error(self, capsys):
+        result = ToolResult(tool="edit_file", success=False, output="", error="file not found")
+        _stream_turn(3, 24, "edit_file", {"path": "missing.py"}, result)
+        captured = capsys.readouterr()
+        assert "ERROR" in captured.out
+        assert "file not found" in captured.out
+
+    def test_command_arg_surfaced(self, capsys):
+        result = ToolResult(tool="run_command", success=True, output="ok")
+        _stream_turn(2, 24, "run_command", {"command": "pytest tests/"}, result)
+        captured = capsys.readouterr()
+        assert "pytest tests/" in captured.out
+
+    def test_no_args_still_prints(self, capsys):
+        result = ToolResult(tool="todo_read", success=True, output="[ ] step 1")
+        _stream_turn(5, 24, "todo_read", {}, result)
+        captured = capsys.readouterr()
+        assert "todo_read" in captured.out
+
+    def test_streaming_fires_on_each_loop_turn(self, workspace: Path):
+        """Integration: verify _stream_turn is called inside the engine loop."""
+        responses = [
+            json.dumps({"tool": "todo_read", "args": {}}),
+            json.dumps({"tool": "done", "args": {}}),
+        ]
+        idx = 0
+        def chat_fn(messages, model, options):
+            nonlocal idx
+            r = responses[idx]; idx += 1; return r
+
+        reg = ToolRegistry(workspace_roots=[workspace])
+        engine = ToolLoopEngine(registry=reg, chat_fn=chat_fn, model="m", max_turns=24)
+        with patch("sage.execution.tool_loop._stream_turn") as mock_stream:
+            engine.run(system_prompt="sys", task_description="task")
+        assert mock_stream.call_count == 1   # called once for todo_read, not for done

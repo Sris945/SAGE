@@ -333,3 +333,105 @@ class TestHelpers:
         assert len(occurrences) == 2
         assert 1 in occurrences
         assert 3 in occurrences
+
+
+# ── search_replace ─────────────────────────────────────────────────────────────
+
+class TestSearchReplace:
+    def test_replaces_across_files(self, workspace: Path):
+        reg = ToolRegistry(workspace_roots=[workspace])
+        # plant a string in two files
+        (workspace / "a.py").write_text("def greet(): pass\n")
+        (workspace / "b.py").write_text("x = greet()\n")
+        result = reg.dispatch({"tool": "search_replace", "args": {
+            "old_string": "greet",
+            "new_string": "hello",
+            "pattern": "*.py",
+            "root": str(workspace),
+        }})
+        assert result.success
+        assert "replacement" in result.output
+        assert (workspace / "a.py").read_text() == "def hello(): pass\n"
+        assert (workspace / "b.py").read_text() == "x = hello()\n"
+
+    def test_no_match_returns_zero(self, workspace: Path):
+        reg = ToolRegistry(workspace_roots=[workspace])
+        result = reg.dispatch({"tool": "search_replace", "args": {
+            "old_string": "nonexistent_xyz",
+            "new_string": "other",
+        }})
+        assert result.success
+        assert "0 replacement" in result.output
+
+    def test_rejects_path_traversal(self, workspace: Path, tmp_path: Path):
+        outside = tmp_path.parent
+        reg = ToolRegistry(workspace_roots=[workspace])
+        result = reg.dispatch({"tool": "search_replace", "args": {
+            "old_string": "x",
+            "new_string": "y",
+            "root": str(outside),
+        }})
+        assert not result.success
+        assert "outside workspace" in result.error
+
+    def test_empty_old_string_rejected(self, workspace: Path):
+        reg = ToolRegistry(workspace_roots=[workspace])
+        result = reg.dispatch({"tool": "search_replace", "args": {
+            "old_string": "",
+            "new_string": "y",
+        }})
+        assert not result.success
+
+
+# ── todo_write / todo_read ─────────────────────────────────────────────────────
+
+class TestTodoTools:
+    def test_write_and_read_roundtrip(self, workspace: Path):
+        reg = ToolRegistry(workspace_roots=[workspace])
+        todos = [
+            {"id": "1", "text": "Read files", "status": "done"},
+            {"id": "2", "text": "Edit main.py", "status": "in_progress"},
+            {"id": "3", "text": "Run tests", "status": "pending"},
+        ]
+        write_result = reg.dispatch({"tool": "todo_write", "args": {"todos": todos}})
+        assert write_result.success
+        assert "Todo list updated" in write_result.output
+
+        read_result = reg.dispatch({"tool": "todo_read", "args": {}})
+        assert read_result.success
+        assert "[x]" in read_result.output   # done
+        assert "[~]" in read_result.output   # in_progress
+        assert "[ ]" in read_result.output   # pending
+        assert "Read files" in read_result.output
+
+    def test_read_empty_returns_message(self, workspace: Path):
+        reg = ToolRegistry(workspace_roots=[workspace])
+        result = reg.dispatch({"tool": "todo_read", "args": {}})
+        assert result.success
+        assert "no todos" in result.output
+
+    def test_write_overwrites_previous(self, workspace: Path):
+        reg = ToolRegistry(workspace_roots=[workspace])
+        reg.dispatch({"tool": "todo_write", "args": {
+            "todos": [{"id": "1", "text": "old step", "status": "pending"}],
+        }})
+        reg.dispatch({"tool": "todo_write", "args": {
+            "todos": [{"id": "1", "text": "new step", "status": "done"}],
+        }})
+        read = reg.dispatch({"tool": "todo_read", "args": {}})
+        assert "new step" in read.output
+        assert "old step" not in read.output
+
+    def test_invalid_status_defaults_to_pending(self, workspace: Path):
+        reg = ToolRegistry(workspace_roots=[workspace])
+        result = reg.dispatch({"tool": "todo_write", "args": {
+            "todos": [{"id": "1", "text": "step", "status": "BOGUS"}],
+        }})
+        assert result.success
+        read = reg.dispatch({"tool": "todo_read", "args": {}})
+        assert "[ ]" in read.output   # defaulted to pending
+
+    def test_non_list_todos_rejected(self, workspace: Path):
+        reg = ToolRegistry(workspace_roots=[workspace])
+        result = reg.dispatch({"tool": "todo_write", "args": {"todos": "not a list"}})
+        assert not result.success
