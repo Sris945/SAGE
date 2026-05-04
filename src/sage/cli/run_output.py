@@ -39,6 +39,8 @@ class RunReport:
     """Path to ``.sage/last_run_metrics.json`` when present."""
     orchestrator_interventions: int | None = None
     human_checkpoints_reached: int | None = None
+    cross_file_review: dict | None = None
+    """Serialised CrossFileReviewResult (or None if skipped/not run)."""
 
 
 def _truncate(s: str, max_len: int = 160) -> str:
@@ -113,6 +115,8 @@ def build_run_report(state: dict) -> RunReport:
     except Exception:
         pass
 
+    cfr = state.get("cross_file_review_result")
+
     return RunReport(
         goal=goal or "[muted](no goal text in state)[/muted]",
         plan_only=bool(state.get("plan_only")),
@@ -127,6 +131,7 @@ def build_run_report(state: dict) -> RunReport:
         metrics_path=metrics_path,
         orchestrator_interventions=orch_iv,
         human_checkpoints_reached=chk_n,
+        cross_file_review=cfr if isinstance(cfr, dict) else None,
     )
 
 
@@ -235,6 +240,38 @@ def print_run_report(report: RunReport, *, level: str | None = None) -> None:
                     report.how_to_run_hint,
                     title="[brand]How to run[/brand]",
                     border_style="#0f766e",
+                    padding=(0, 1),
+                )
+            )
+            c.print()
+
+        # Cross-file review
+        if report.cross_file_review and not report.cross_file_review.get("skipped"):
+            cfr = report.cross_file_review
+            issues = cfr.get("issues") or []
+            n_files = len(cfr.get("files_reviewed") or [])
+            passed = cfr.get("passed", True)
+            critical = sum(1 for i in issues if i.get("severity") == "critical")
+            high = sum(1 for i in issues if i.get("severity") == "high")
+            status_str = "[bold green]PASS[/bold green]" if passed else "[bold red]FAIL[/bold red]"
+            cfr_lines = [
+                f"Result: {status_str}  "
+                f"[muted]({len(issues)} issue(s), {critical} critical, {high} high) "
+                f"across {n_files} file(s)[/muted]"
+            ]
+            for issue in issues[:5]:
+                sev = issue.get("severity", "?").upper()
+                desc = escape(issue.get("description", "")[:100])
+                files = ", ".join(issue.get("files_involved") or [])
+                sev_color = "bold red" if sev in ("CRITICAL",) else ("bold yellow" if sev == "HIGH" else "dim")
+                cfr_lines.append(f"  [{sev_color}][{sev}][/{sev_color}] {desc}" + (f" [dim]({files})[/dim]" if files else ""))
+            if len(issues) > 5:
+                cfr_lines.append(f"  [dim]… +{len(issues) - 5} more[/dim]")
+            c.print(
+                Panel.fit(
+                    "\n".join(cfr_lines),
+                    title="[brand]Cross-file review[/brand]",
+                    border_style="#0f766e" if passed else "#b45309",
                     padding=(0, 1),
                 )
             )
