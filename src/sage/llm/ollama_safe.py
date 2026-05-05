@@ -189,6 +189,38 @@ def _wait_future_with_sage_spinner(
         sys.stderr.flush()
 
 
+def stream_chat(
+    *,
+    model: str,
+    messages: list[dict[str, Any]],
+    options: Optional[dict[str, Any]] = None,
+):
+    """
+    Generator: yields str token chunks as they stream from the model.
+    Falls back to a single-chunk yield if streaming is unavailable.
+    """
+    if ollama is None:
+        raise RuntimeError("ollama module not installed")
+    try:
+        for chunk in ollama.chat(
+            model=model,
+            messages=messages,
+            options=options or {},
+            stream=True,
+        ):
+            try:
+                content = chunk.message.content or ""
+            except AttributeError:
+                try:
+                    content = (chunk.get("message") or {}).get("content") or ""
+                except Exception:
+                    content = ""
+            if content:
+                yield content
+    except Exception as exc:
+        raise RuntimeError(f"ollama stream error: {exc}") from exc
+
+
 def chat_with_timeout(
     *,
     model: str,
