@@ -1329,6 +1329,17 @@ def execute_agent(state: SAGEState) -> SAGEState:
                 and feed.should_preempt(task.id)
             )
         )
+        # Inject cross-task working memory so the coder knows which files
+        # were already written/edited by previous tasks in this run.
+        _wm = state.get("working_memory") or {}
+        if _wm:
+            _wm_lines = ["CONTEXT — files modified by earlier tasks in this run:"]
+            for _f, _ops in sorted(_wm.items()):
+                _op_summary = ", ".join(
+                    f"{o['action']} by {o['task_id']}" for o in _ops
+                )
+                _wm_lines.append(f"  {_f}: {_op_summary}")
+            universal_prefix = (universal_prefix or "") + "\n\n" + "\n".join(_wm_lines)
         coder_result = coder.run(
             task={
                 "id": task.id,
@@ -1362,6 +1373,16 @@ def execute_agent(state: SAGEState) -> SAGEState:
             all_written = state.get("files_written", []) + coder_result.get("files_written", [])
             all_edited = state.get("files_edited", []) + coder_result.get("files_edited", [])
             tokens_used = int(state.get("tokens_used") or 0) + int(coder_result.get("tokens_used") or 0)
+            # Update cross-task working memory so subsequent tasks know what changed
+            working_memory = dict(state.get("working_memory") or {})
+            for f in coder_result.get("files_written", []):
+                working_memory.setdefault(f, []).append(
+                    {"task_id": task.id, "action": "wrote"}
+                )
+            for f in coder_result.get("files_edited", []):
+                working_memory.setdefault(f, []).append(
+                    {"task_id": task.id, "action": "edited"}
+                )
             return {
                 **state,
                 "task_dag": graph.to_dict(),
@@ -1371,6 +1392,7 @@ def execute_agent(state: SAGEState) -> SAGEState:
                 "files_written": list(dict.fromkeys(all_written)),
                 "files_edited": list(dict.fromkeys(all_edited)),
                 "tokens_used": tokens_used,
+                "working_memory": working_memory,
                 "last_error": "",
                 "fix_pattern_hit": False,
                 "fix_pattern_applied": False,

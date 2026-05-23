@@ -164,7 +164,8 @@ Run `sage commands` or `sage` → `/commands` for the full catalog.
 | `sage status` | Last saved session snapshot |
 | `sage session` | `reset` / `refresh` / `status` / `handoff` (view or `--clear` interrupt handoff) |
 | `sage prep` | Hardware scan + recommended Ollama pulls (`--disk-budget`, `--json`) |
-| `sage setup` | `scan` \| `suggest` \| `apply` \| `pull` \| `init` — machine-aware Ollama routing |
+| `sage setup` | `scan` \| `suggest` \| `apply` \| `pull` \| `init` — machine-aware Ollama routing (interactive wizard on first run) |
+| `sage index` | Build or rebuild the Qdrant semantic code index under `.sage/qdrant_code_index/` |
 | `sage config` | `show` \| `validate` \| `migrate` \| `paths` \| `set` — inspect/edit `models.yaml` |
 | `sage bench` | Benchmark suite; `--out`, `--run-pack-dir`, `--compare-policy` |
 | `sage permissions` | Tool policy; `permissions set …` writes `.sage/policy.json` |
@@ -174,6 +175,91 @@ Run `sage commands` or `sage` → `/commands` for the full catalog.
 | `sage eval` | `golden` \| `e2e` \| `smoke` — trust / regression checks (see tests) |
 
 RL and simulator walkthrough → **[getting_started.md](getting_started.md)**.
+
+---
+
+## Hardware setup & model allocation (`sage setup`)
+
+On first install — or any time you want to reassign resources — run the interactive wizard:
+
+```bash
+sage setup
+```
+
+This runs four stages:
+
+1. **Scan** — detects RAM (GiB), VRAM (via nvidia-smi / rocm-smi), CPU cores, and free disk under the Ollama model dir.
+2. **Suggest** — maps detected hardware to a model tier (minimal / light / balanced / large) and lets you choose a quality preference (speed / balanced / quality).
+3. **Apply** — writes the chosen stack into `models.yaml` (planner, architect, coder, shell roles).
+4. **Pull** — downloads any missing Ollama models with a Rich progress bar (skips already-present ones).
+
+Results are saved to `.sage/hardware.json` for future headless re-runs (`sage setup --headless`).
+
+### Model tiers
+
+| Tier | RAM threshold | Tiny / shell | Coder | Planner / Architect |
+|------|--------------|-------------|-------|---------------------|
+| minimal | < 5 GiB | 1.5b | 1.5b | 1.5b |
+| light | 5–12 GiB | 1.5b | 7b | 1.5b |
+| balanced | 12–24 GiB | 1.5b | 7b | 14b |
+| large | ≥ 24 GiB | 1.5b | 14b | 32b |
+
+`quality_preference = "quality"` bumps effective RAM +20% (moves to the next tier); `"speed"` drops it −20%.
+
+---
+
+## Semantic code index (`sage index`)
+
+SAGE maintains a local Qdrant vector index over your project's source files so that the context compressor can retrieve the most relevant code chunks before sending prompts to the LLM.
+
+```bash
+sage index           # full rebuild (first run or after large refactors)
+```
+
+The index lives at **`.sage/qdrant_code_index/`** and is updated **incrementally** after every file write or edit inside an agent tool-use loop — no manual rebuild needed during normal operation.
+
+Supported extensions: `.py .ts .js .jsx .tsx .go .rs .java .cpp .c .h .md .yaml .yml .toml .json`
+
+Skipped directories: `.git .venv venv __pycache__ node_modules .sage dist build`
+
+Chunk size: 40 lines with a 30-line stride.
+
+Requires `qdrant-client` (`pip install qdrant-client`). If not installed, `sage index` prints an install hint and exits — SAGE still works without it (Qdrant retrieval is skipped gracefully).
+
+---
+
+## Token optimization
+
+SAGE tracks context usage per turn and reacts before hitting the model's context window:
+
+| Threshold | Action |
+|-----------|--------|
+| 80 % of context window | Inserts a warning message into the conversation with exact token counts; the agent can choose to summarise or wrap up. |
+| 90 % | Prunes the oldest assistant turns (keeps the system prompt + last 6 messages) — or calls the LLM to auto-compact if `SAGE_AUTO_COMPACT=1`. |
+
+### Environment variables
+
+| Variable | Effect |
+|----------|--------|
+| `SAGE_AUTO_COMPACT=1` | At 90 % context usage, ask the LLM to produce a one-paragraph summary of the oldest half of the conversation before pruning. Off by default (hard prune). |
+
+Token estimation: 1 token ≈ 4 characters (character-count heuristic, no extra API calls).
+
+Context window sizes are read from `models.yaml` → `routing[role].context_window` first, then fall back to a built-in table for common Ollama models.
+
+---
+
+## Cross-task working memory
+
+When SAGE runs a multi-task plan, it keeps a **working memory** of which files were written or edited by each completed task. Before the next task's coder agent starts, that history is appended to its system prompt:
+
+```
+CONTEXT — files modified by earlier tasks in this run:
+  src/auth.py: wrote by T1
+  src/utils.py: edited by T2, edited by T3
+```
+
+This lets later tasks avoid conflicting edits and understand existing context without re-reading every file. The working memory is held in the workflow state (`working_memory` key) and is not persisted across separate `sage run` invocations.
 
 ---
 

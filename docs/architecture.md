@@ -39,7 +39,8 @@ Key subsystems inside `tool_loop.py`:
 | **Plan mode** | When `plan_mode=True`, the engine asks the model for a step-by-step plan before the first tool call and pauses for human confirmation (`y` / `n`). |
 | **Checkpoint / resume** | After every tool turn the engine gzips the full message list + loop metadata to `.sage/loop_checkpoint.bin`. `resume=True` loads it at startup; the file is deleted on successful `done`. |
 | **Token tracking** | `get_last_token_usage()` is called after each LLM response; totals are accumulated in `LoopResult.tokens_used` and surfaced in the run report Outcome panel. |
-| **Context budget warnings** | The engine warns (and can halt) when the message list approaches the model's context limit. |
+| **Context budget management** | At 80 % of the model's context window, the engine inserts a warning. At 90 %, it either hard-prunes old turns or calls the LLM to auto-compact (`SAGE_AUTO_COMPACT=1`). Context window size is read from `models.yaml` then a built-in fallback table. |
+| **Incremental index updates** | After every `write_file`, `edit_file`, or `move_file` tool call, `_trigger_index_update()` fires a background Qdrant re-index for the affected paths. |
 
 ### Context compressor (`context_compressor.py`)
 
@@ -50,6 +51,21 @@ Before injecting codebase context into a task prompt, the compressor selects onl
 3. **Grep exact-token match** — always available as a last resort.
 
 Key parameters: `MAX_CONTEXT_CHARS` (~4 K tokens), `MAX_CHUNKS`, `CHUNK_SIZE`.
+
+### Hardware-aware model selection
+
+At install time (or `sage setup`), SAGE runs a hardware scan and allocation wizard:
+
+1. **Scan** (`scan_hardware()`) — reads RAM from `/proc/meminfo` (Linux) or `sysctl` (macOS), VRAM from `nvidia-smi` / `rocm-smi`, CPU cores, and free disk under the Ollama model dir. Falls back to `fastfetch` / `neofetch` if direct reads fail.
+2. **Wizard** (`run_allocation_wizard()`) — interactive Rich UI; headless mode picks the middle option.
+3. **Tier selection** (`suggest_ollama_stack()`) — maps `(ram_budget_gib, quality_preference)` to a tier; writes model names per role into `models.yaml`.
+4. **Pull** (`pull_ollama_tags()`) — downloads only missing models; displays per-model progress.
+
+Results persisted to **`.sage/hardware.json`**.
+
+### Cross-task working memory
+
+`workflow.py` accumulates a `working_memory: dict[str, list[dict]]` key in workflow state, recording which task wrote or edited each file. Before each coder task starts, the relevant portion of this log is appended to the coder's system prompt so agents don't duplicate or conflict with earlier work.
 
 ### Grep-based file pre-loading (`CoderAgent._preload_files`)
 
