@@ -310,6 +310,19 @@ def cmd_undo(_args) -> None:
         print("[SAGE] Undo failed — could not restore files (check .sage/undo/).")
 
 
+def cmd_index(args) -> None:
+    """Build the Qdrant semantic code index for the project."""
+    from sage.memory.code_indexer import build_index
+    root = Path(getattr(args, "root", ".")).resolve()
+    verbose = not getattr(args, "quiet", False)
+    stats = build_index(root=root, verbose=verbose)
+    if not stats.get("ok"):
+        print(f"[SAGE index] Failed: {stats.get('error', 'unknown error')}")
+        raise SystemExit(1)
+    if not verbose:
+        print(f"[SAGE index] {stats['chunks']} chunks from {stats['files']} files")
+
+
 def cmd_history(args) -> None:
     """Show recent pipeline run history from memory/tasks.db."""
     from sage.memory.sqlite_store import TaskStore
@@ -718,6 +731,7 @@ def build_parser(*, exit_on_error: bool = True) -> argparse.ArgumentParser:
         help="Approximate disk budget for model pulls (GiB).",
     )
     setup_sug.add_argument("--json", action="store_true")
+    setup_sug.add_argument("--headless", action="store_true", help="Skip interactive wizard; use safe defaults")
     setup_apply = setup_sub.add_parser("apply", help="Write suggested routing into models.yaml")
     setup_apply.add_argument(
         "--disk-budget",
@@ -734,8 +748,10 @@ def build_parser(*, exit_on_error: bool = True) -> argparse.ArgumentParser:
         action="store_true",
         help="Print merged YAML as JSON instead of writing",
     )
+    setup_apply.add_argument("--headless", action="store_true", help="Skip interactive wizard")
     setup_pull = setup_sub.add_parser("pull", help="Run ollama pull for suggested tags")
     setup_pull.add_argument("--disk-budget", type=float, default=18.0)
+    setup_pull.add_argument("--headless", action="store_true", help="Skip interactive wizard")
     setup_pull.add_argument("--json", action="store_true")
     setup_init = setup_sub.add_parser(
         "init",
@@ -873,6 +889,13 @@ def build_parser(*, exit_on_error: bool = True) -> argparse.ArgumentParser:
         "smoke",
         help="Run tests/integration with SAGE_MODEL_PROFILE=test (needs `ollama` + small model)",
     )
+
+    index_p = sub.add_parser(
+        "index",
+        help="Build or rebuild the Qdrant semantic code index for the current project",
+    )
+    index_p.add_argument("--root", default=".", help="Project root (default: cwd)")
+    index_p.add_argument("--quiet", action="store_true", help="Suppress progress output")
 
     prep_p = sub.add_parser(
         "prep",
@@ -1067,6 +1090,8 @@ def _dispatch_command_impl(args: argparse.Namespace, parser: argparse.ArgumentPa
         cmd_undo(args)
     elif args.command == "history":
         cmd_history(args)
+    elif args.command == "index":
+        cmd_index(args)
     elif args.command == "doctor":
         cmd_doctor(args)
     elif args.command == "config":
@@ -1348,8 +1373,12 @@ def cmd_shell(_args) -> None:
 
 def cmd_setup(args) -> None:
     from sage.cli.hardware_setup import (
+        AllocationConfig,
         apply_routing_to_config,
+        load_hardware_json,
         pull_ollama_tags,
+        run_allocation_wizard,
+        save_hardware_json,
         scan_hardware,
         suggest_ollama_stack,
         write_models_yaml,
@@ -1364,33 +1393,82 @@ def cmd_setup(args) -> None:
         if getattr(args, "json", False):
             print(json.dumps(prof.to_dict(), indent=2))
         else:
-            print("[SAGE setup] hardware scan")
-            print(f"  os: {prof.os_name}")
-            print(f"  ram_gib: {prof.ram_gib}")
-            print(f"  vram_gib: {prof.vram_gib}")
-            print(f"  sources: {prof.sources}")
-            if prof.raw_excerpt:
-                print(f"  excerpt:\n{prof.raw_excerpt[:800]}")
+            try:
+                from rich.panel import Panel
+                from sage.cli.branding import get_console
+                c = get_console()
+                lines = [
+                    f"[white]OS[/white]         {prof.os_name}",
+                    f"[white]RAM[/white]        [brand]{prof.ram_gib or '?'} GiB[/brand]",
+                    f"[white]VRAM[/white]       [brand]{prof.vram_gib or 'none detected'} GiB[/brand]",
+                    f"[white]CPU cores[/white]  [brand]{prof.cpu_cores or '?'}[/brand]",
+                    f"[white]Disk free[/white]  [brand]{prof.disk_free_gib or '?'} GiB[/brand]  "
+                    f"[dim]({prof.ollama_model_dir})[/dim]",
+                    f"[white]Sources[/white]    [dim]{prof.sources}[/dim]",
+                ]
+                c.print(Panel.fit("\n".join(lines), title="[brand]Hardware scan[/brand]",
+                                  border_style="#0d9488", padding=(0, 1)))
+            except Exception:
+                print("[SAGE setup] hardware scan")
+                print(f"  os: {prof.os_name}  ram: {prof.ram_gib} GiB"
+                      f"  vram: {prof.vram_gib}  cores: {prof.cpu_cores}"
+                      f"  disk_free: {prof.disk_free_gib} GiB")
         return
 
     if args.setup_command == "suggest":
         prof = scan_hardware()
-        sug = suggest_ollama_stack(prof, disk_budget_gib=float(args.disk_budget))
+        headless = getattr(args, "headless", False) or getattr(args, "json", False)
+        alloc = run_allocation_wizard(prof, headless=headless)
+        sug = suggest_ollama_stack(
+            prof,
+            disk_budget_gib=alloc.disk_budget_gib,
+            ram_budget_gib=alloc.ram_budget_gib,
+            quality_preference=alloc.quality_preference,
+        )
         if getattr(args, "json", False):
-            out = {"hardware": prof.to_dict(), "suggestion": sug}
-            print(json.dumps(out, indent=2))
+            print(json.dumps({"hardware": prof.to_dict(), "allocation": alloc.to_dict(),
+                              "suggestion": sug}, indent=2))
         else:
-            print("[SAGE setup] suggested Ollama stack")
-            print(f"  tier: {sug['tier']}  est_disk_gib: ~{sug['estimated_pull_gib']}")
-            print(f"  pull: {', '.join(sug['ollama_tags'])}")
-            print("  roles (preview):")
-            for role, cfg in sorted(sug["routing"].items()):
-                print(f"    {role}: primary={cfg['primary']} fallback={cfg['fallback']}")
+            try:
+                from rich.panel import Panel
+                from rich.table import Table
+                from rich import box
+                from sage.cli.branding import get_console
+                c = get_console()
+                table = Table(show_header=True, header_style="bold #5eead4",
+                              border_style="#334155", box=box.SIMPLE)
+                table.add_column("Role", style="#94a3b8")
+                table.add_column("Primary")
+                table.add_column("Fallback", style="dim")
+                for role, cfg in sorted(sug["routing"].items()):
+                    table.add_row(role, cfg["primary"], cfg["fallback"])
+                c.print(Panel(
+                    f"[white]Tier[/white]  [brand]{sug['tier']}[/brand]  "
+                    f"[muted]RAM budget {alloc.ram_budget_gib} GiB · "
+                    f"disk ~{sug['estimated_pull_gib']} GiB[/muted]\n"
+                    f"[white]Pull[/white]  [dim]{', '.join(sug['ollama_tags'])}[/dim]",
+                    title="[brand]Suggested stack[/brand]", border_style="#0d9488", padding=(0, 1),
+                ))
+                c.print(Panel(table, title="[brand]Role routing[/brand]",
+                              border_style="#0f766e"))
+            except Exception:
+                print(f"[SAGE setup] tier={sug['tier']}  ~{sug['estimated_pull_gib']} GiB")
+                print(f"  pull: {', '.join(sug['ollama_tags'])}")
+                for role, cfg in sorted(sug["routing"].items()):
+                    print(f"  {role}: {cfg['primary']} / {cfg['fallback']}")
         return
 
     if args.setup_command == "apply":
         prof = scan_hardware()
-        sug = suggest_ollama_stack(prof, disk_budget_gib=float(args.disk_budget))
+        headless = getattr(args, "headless", False)
+        # Reuse saved allocation if present, otherwise run wizard
+        alloc = load_hardware_json() or run_allocation_wizard(prof, headless=headless)
+        sug = suggest_ollama_stack(
+            prof,
+            disk_budget_gib=getattr(args, "disk_budget", None) or alloc.disk_budget_gib,
+            ram_budget_gib=alloc.ram_budget_gib,
+            quality_preference=alloc.quality_preference,
+        )
         cfg_path = (
             Path(args.models_yaml) if getattr(args, "models_yaml", None) else _models_config_path()
         )
@@ -1400,20 +1478,34 @@ def cmd_setup(args) -> None:
             print(json.dumps(merged, indent=2))
             return
         write_models_yaml(cfg_path, merged)
-        print(f"[SAGE setup] wrote routing to {cfg_path}")
+        save_hardware_json(alloc)
+        try:
+            from rich.panel import Panel
+            from sage.cli.branding import get_console
+            get_console().print(Panel.fit(
+                f"[white]Config[/white]  {cfg_path}\n"
+                f"[white]Tier[/white]    [brand]{sug['tier']}[/brand]  "
+                f"[muted]{alloc.ram_budget_gib} GiB RAM budget[/muted]",
+                title="[brand]Applied[/brand]", border_style="#0d9488", padding=(0, 1),
+            ))
+        except Exception:
+            print(f"[SAGE setup] wrote routing to {cfg_path}")
         return
 
     if args.setup_command == "pull":
         prof = scan_hardware()
-        sug = suggest_ollama_stack(prof, disk_budget_gib=float(args.disk_budget))
+        headless = getattr(args, "headless", False)
+        alloc = load_hardware_json() or run_allocation_wizard(prof, headless=headless)
+        sug = suggest_ollama_stack(
+            prof,
+            disk_budget_gib=getattr(args, "disk_budget", None) or alloc.disk_budget_gib,
+            ram_budget_gib=alloc.ram_budget_gib,
+            quality_preference=alloc.quality_preference,
+        )
         tags = list(sug["ollama_tags"])
+        results = pull_ollama_tags(tags)
         if getattr(args, "json", False):
-            print(json.dumps({"pull": pull_ollama_tags(tags)}, indent=2))
-        else:
-            print(f"[SAGE setup] ollama pull ({len(tags)} tags)…")
-            for r in pull_ollama_tags(tags):
-                status = "ok" if r["ok"] else "fail"
-                print(f"  - {r['tag']}: {status}")
+            print(json.dumps({"pull": results}, indent=2))
         return
 
 
