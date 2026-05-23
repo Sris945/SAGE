@@ -125,6 +125,7 @@ def load_memory(state: SAGEState) -> SAGEState:
     SessionStart hook.
     1. Check for handoff.json → resume mode
     2. Load system_state.json
+    3. Inject recent task failures as prior-failure context
     """
     from sage.memory.manager import MemoryManager
     from sage.orchestrator.session_manager import SessionManager
@@ -141,6 +142,11 @@ def load_memory(state: SAGEState) -> SAGEState:
     sage_memory_summary = load_sage_memory()
     if sage_memory_summary:
         session_memory["sage_memory_summary"] = sage_memory_summary
+
+    # Inject recent failure history so planner/coder can avoid repeated mistakes
+    prior_failures = _load_recent_failures(n=5, since_days=14)
+    if prior_failures:
+        session_memory["prior_failure_context"] = prior_failures
 
     feed = OrchestratorIntelligenceFeed()
     out: SAGEState = {
@@ -161,6 +167,32 @@ def load_memory(state: SAGEState) -> SAGEState:
         out = apply_handoff_to_state(out, handoff)
         rehydrate_insights_into_feed(feed, handoff.get("insight_snapshot") or [])
     return out
+
+
+def _load_recent_failures(n: int = 5, since_days: int = 14) -> str:
+    """
+    Query SQLite task store for recent failures and format as a warning context block.
+    Returns empty string if no failures or store unavailable.
+    """
+    try:
+        from sage.memory.sqlite_store import TaskStore
+        store = TaskStore()
+        failures = store.query(status="failed", since_days=since_days)
+        if not failures:
+            failures = store.query(status="error", since_days=since_days)
+        if not failures:
+            return ""
+        recent = failures[:n]
+        lines = ["Recent task failures (avoid repeating these mistakes):"]
+        for f in recent:
+            task_id = f.get("task_id", "?")[:60]
+            err = f.get("error_preview", "")[:120]
+            agent = f.get("agent", "?")
+            ts = f.get("timestamp", "")[:10]
+            lines.append(f"  [{ts}] {agent}: task={task_id!r} error={err!r}")
+        return "\n".join(lines)
+    except Exception:
+        return ""
 
 
 def prompt_middleware(state: SAGEState) -> SAGEState:
@@ -1308,6 +1340,8 @@ def execute_agent(state: SAGEState) -> SAGEState:
             failure_count=attempt,
             universal_prefix=universal_prefix,
             insight_sink=insight_sink,
+            plan_mode=bool(state.get("plan_mode", False)),
+            resume_from_checkpoint=bool(state.get("resume_from_checkpoint", False)),
         )
 
         coder_status = coder_result.get("status", "")
@@ -1324,12 +1358,19 @@ def execute_agent(state: SAGEState) -> SAGEState:
                 artifacts_by_task = {**artifacts_by_task, task.id: primary_file}
             task.status = "completed"
             state["verification_passed"] = True
+            # Accumulate all files changed across tasks for the run summary
+            all_written = state.get("files_written", []) + coder_result.get("files_written", [])
+            all_edited = state.get("files_edited", []) + coder_result.get("files_edited", [])
+            tokens_used = int(state.get("tokens_used") or 0) + int(coder_result.get("tokens_used") or 0)
             return {
                 **state,
                 "task_dag": graph.to_dict(),
                 "current_task": vars(task),
                 "artifacts_by_task": artifacts_by_task,
                 "execution_result": {"status": "ok", "file": primary_file},
+                "files_written": list(dict.fromkeys(all_written)),
+                "files_edited": list(dict.fromkeys(all_edited)),
+                "tokens_used": tokens_used,
                 "last_error": "",
                 "fix_pattern_hit": False,
                 "fix_pattern_applied": False,
@@ -1343,11 +1384,13 @@ def execute_agent(state: SAGEState) -> SAGEState:
             error = coder_result.get("error") or coder_result.get("reason") or "coder failed"
             task.status = "failed"
             state["last_error"] = str(error)
+            tokens_used = int(state.get("tokens_used") or 0) + int(coder_result.get("tokens_used") or 0)
             return {
                 **state,
                 "task_dag": graph.to_dict(),
                 "current_task": vars(task),
                 "execution_result": {"status": "error", "file": coder_result.get("file", "")},
+                "tokens_used": tokens_used,
                 "fix_pattern_hit": False,
                 "fix_pattern_applied": False,
                 "pending_patch_request": pending_patch_request,
@@ -1358,12 +1401,14 @@ def execute_agent(state: SAGEState) -> SAGEState:
         pending_patch_request = coder_result.get("patch_request") or {}
         pending_patch_source = "coder"
         task.status = "running"
+        tokens_used = int(state.get("tokens_used") or 0) + int(coder_result.get("tokens_used") or 0)
 
         return {
             **state,
             "task_dag": graph.to_dict(),
             "current_task": vars(task),
             "execution_result": {"status": "ok", "file": coder_result.get("file", "")},
+            "tokens_used": tokens_used,
             "last_error": "",
             "fix_pattern_hit": False,
             "fix_pattern_applied": False,

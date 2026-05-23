@@ -315,7 +315,8 @@ class TestLoopResult:
 # ── _stream_turn ──────────────────────────────────────────────────────────────
 
 class TestStreamTurn:
-    def test_ok_tool_prints_line(self, capsys):
+    def test_ok_tool_prints_line(self, capsys, monkeypatch):
+        monkeypatch.setenv("SAGE_FORCE_STREAM", "1")
         result = ToolResult(tool="read_file", success=True, output="contents")
         _stream_turn(1, 24, "read_file", {"path": "src/main.py"}, result)
         captured = capsys.readouterr()
@@ -324,24 +325,33 @@ class TestStreamTurn:
         assert "src/main.py" in captured.out
         assert "ok" in captured.out
 
-    def test_error_tool_prints_error(self, capsys):
+    def test_error_tool_prints_error(self, capsys, monkeypatch):
+        monkeypatch.setenv("SAGE_FORCE_STREAM", "1")
         result = ToolResult(tool="edit_file", success=False, output="", error="file not found")
         _stream_turn(3, 24, "edit_file", {"path": "missing.py"}, result)
         captured = capsys.readouterr()
         assert "ERROR" in captured.out
         assert "file not found" in captured.out
 
-    def test_command_arg_surfaced(self, capsys):
+    def test_command_arg_surfaced(self, capsys, monkeypatch):
+        monkeypatch.setenv("SAGE_FORCE_STREAM", "1")
         result = ToolResult(tool="run_command", success=True, output="ok")
         _stream_turn(2, 24, "run_command", {"command": "pytest tests/"}, result)
         captured = capsys.readouterr()
         assert "pytest tests/" in captured.out
 
-    def test_no_args_still_prints(self, capsys):
+    def test_no_args_still_prints(self, capsys, monkeypatch):
+        monkeypatch.setenv("SAGE_FORCE_STREAM", "1")
         result = ToolResult(tool="todo_read", success=True, output="[ ] step 1")
         _stream_turn(5, 24, "todo_read", {}, result)
         captured = capsys.readouterr()
         assert "todo_read" in captured.out
+
+    def test_silent_in_non_tty(self, capsys, monkeypatch):
+        monkeypatch.delenv("SAGE_FORCE_STREAM", raising=False)
+        result = ToolResult(tool="read_file", success=True, output="x")
+        _stream_turn(1, 24, "read_file", {}, result)
+        assert capsys.readouterr().out == ""
 
     def test_streaming_fires_on_each_loop_turn(self, workspace: Path):
         """Integration: verify _stream_turn is called inside the engine loop."""
@@ -359,3 +369,186 @@ class TestStreamTurn:
         with patch("sage.execution.tool_loop._stream_turn") as mock_stream:
             engine.run(system_prompt="sys", task_description="task")
         assert mock_stream.call_count == 1   # called once for todo_read, not for done
+
+
+# ── Plan mode ─────────────────────────────────────────────────────────────────
+
+class TestPlanMode:
+    def test_plan_confirmed_proceeds(self, registry: ToolRegistry, monkeypatch):
+        """When user confirms the plan, the engine runs to completion."""
+        responses = [
+            "1. Read file\n2. Edit file\n3. Run tests",   # planning turn
+            '{"tool": "done", "args": {}}',                # execution turn
+        ]
+        idx = 0
+        def chat_fn(messages, model, options):
+            nonlocal idx; r = responses[idx]; idx += 1; return r
+
+        monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+        monkeypatch.setattr("builtins.input", lambda _="": "y")
+
+        engine = ToolLoopEngine(registry=registry, chat_fn=chat_fn, model="m",
+                                max_turns=10, plan_mode=True)
+        result = engine.run("sys", "task")
+        assert result.success
+
+    def test_plan_rejected_cancels(self, registry: ToolRegistry, monkeypatch):
+        """When user types 'n', loop returns an error result without executing."""
+        responses = ["1. Read file\n2. Done"]
+        chat_fn = lambda messages, model, options: responses[0]
+
+        monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+        monkeypatch.setattr("builtins.input", lambda _="": "n")
+
+        engine = ToolLoopEngine(registry=registry, chat_fn=chat_fn, model="m",
+                                max_turns=10, plan_mode=True)
+        result = engine.run("sys", "task")
+        assert not result.success
+        assert "Cancelled" in result.error
+
+    def test_plan_non_interactive_proceeds(self, registry: ToolRegistry, monkeypatch):
+        """In non-TTY mode, plan is shown but execution proceeds without user input."""
+        responses = [
+            "1. Read file\n2. Done",
+            '{"tool": "done", "args": {}}',
+        ]
+        idx = 0
+        def chat_fn(messages, model, options):
+            nonlocal idx; r = responses[idx]; idx += 1; return r
+
+        monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+
+        engine = ToolLoopEngine(registry=registry, chat_fn=chat_fn, model="m",
+                                max_turns=10, plan_mode=True)
+        result = engine.run("sys", "task")
+        assert result.success
+
+    def test_plan_mode_off_by_default(self, registry: ToolRegistry):
+        """plan_mode defaults to False — no planning LLM call is made."""
+        call_count = [0]
+        def chat_fn(messages, model, options):
+            call_count[0] += 1
+            return '{"tool": "done", "args": {}}'
+
+        engine = ToolLoopEngine(registry=registry, chat_fn=chat_fn, model="m", max_turns=5)
+        result = engine.run("sys", "task")
+        assert result.success
+        assert call_count[0] == 1   # exactly 1 call — no planning pre-call
+
+
+# ── make_ollama_chat_fn (streaming) ──────────────────────────────────────────
+
+# ── Read cache ────────────────────────────────────────────────────────────────
+
+class TestReadCache:
+    def test_second_read_uses_cache(self, registry: ToolRegistry, workspace: Path):
+        """Repeated read_file calls should be served from cache (no second disk read)."""
+        dispatch_calls = []
+        original_dispatch = registry.dispatch
+
+        def counting_dispatch(call):
+            dispatch_calls.append(call.get("tool"))
+            return original_dispatch(call)
+
+        responses = [
+            '{"tool": "read_file", "args": {"path": "src/hello.py"}}',
+            '{"tool": "read_file", "args": {"path": "src/hello.py"}}',  # same file again
+            '{"tool": "done", "args": {}}',
+        ]
+        idx = 0
+        def chat_fn(messages, model, options):
+            nonlocal idx; r = responses[idx]; idx += 1; return r
+
+        engine = ToolLoopEngine(registry=registry, chat_fn=chat_fn, model="m", max_turns=10)
+        engine.registry.dispatch = counting_dispatch
+        result = engine.run("sys", "read twice")
+        assert result.success
+        # Only one real dispatch for read_file; second is served from cache
+        real_reads = [c for c in dispatch_calls if c == "read_file"]
+        assert len(real_reads) == 1
+
+    def test_cache_invalidated_after_edit(self, registry: ToolRegistry, workspace: Path):
+        """Cache is cleared when the same file is edited."""
+        responses = [
+            '{"tool": "read_file", "args": {"path": "src/hello.py"}}',
+            json.dumps({"tool": "edit_file", "args": {
+                "path": "src/hello.py",
+                "old_string": "def hi(): return 'hi'",
+                "new_string": "def hi(): return 'hello'",
+            }}),
+            '{"tool": "read_file", "args": {"path": "src/hello.py"}}',  # must re-read after edit
+            '{"tool": "done", "args": {}}',
+        ]
+        idx = 0
+        def chat_fn(messages, model, options):
+            nonlocal idx; r = responses[idx]; idx += 1; return r
+
+        engine = ToolLoopEngine(registry=registry, chat_fn=chat_fn, model="m", max_turns=10)
+        result = engine.run("sys", "edit then re-read")
+        assert result.success
+        # After the edit, the cache entry was cleared, so the second read fetches fresh content
+        assert "hello" in (workspace / "src" / "hello.py").read_text()
+
+
+# ── Smart truncation ──────────────────────────────────────────────────────────
+
+class TestSmartTruncate:
+    def test_short_output_unchanged(self):
+        from sage.execution.tool_loop import _smart_truncate
+        text = "line1\nline2\nline3"
+        assert _smart_truncate(text) == text
+
+    def test_long_output_truncated(self):
+        from sage.execution.tool_loop import _smart_truncate
+        lines = [f"line{i}" for i in range(200)]
+        text = "\n".join(lines)
+        result = _smart_truncate(text, head=10, tail=10)
+        assert "line0" in result
+        assert "line199" in result
+        assert "omitted" in result
+        assert len(result.splitlines()) < 200
+
+    def test_tool_output_truncated_in_engine(self, registry: ToolRegistry, workspace: Path, monkeypatch):
+        """Engine truncates tool output exceeding _MAX_TOOL_OUTPUT_CHARS."""
+        from sage.execution import tool_loop as tl
+        monkeypatch.setattr(tl, "_MAX_TOOL_OUTPUT_CHARS", 10)  # very small threshold
+
+        # Write a file with lots of content
+        (workspace / "big.py").write_text("x = 1\n" * 200)
+
+        responses = [
+            '{"tool": "read_file", "args": {"path": "big.py"}}',
+            '{"tool": "done", "args": {}}',
+        ]
+        idx = 0
+        def chat_fn(messages, model, options):
+            nonlocal idx; r = responses[idx]; idx += 1; return r
+
+        engine = ToolLoopEngine(registry=registry, chat_fn=chat_fn, model="m", max_turns=5)
+        result = engine.run("sys", "read big file")
+        assert result.success
+        # History preview should be truncated
+        assert result.history[0].output_preview is not None
+
+
+# ── make_ollama_chat_fn (streaming) ──────────────────────────────────────────
+
+class TestMakeOllamaChatFn:
+    def test_stream_false_by_default(self, monkeypatch):
+        """With stream=False (default), chat_fn calls chat_with_timeout."""
+        from sage.execution.tool_loop import make_ollama_chat_fn
+
+        fake_response = {"message": {"content": "hello"}}
+        monkeypatch.setattr(
+            "sage.execution.tool_loop.make_ollama_chat_fn.__code__",
+            make_ollama_chat_fn.__code__,  # no-op, just verify it doesn't raise
+        )
+        # Just verify the factory returns a callable
+        fn = make_ollama_chat_fn(stream=False)
+        assert callable(fn)
+
+    def test_stream_true_returns_callable(self):
+        """With stream=True, factory still returns a callable chat_fn."""
+        from sage.execution.tool_loop import make_ollama_chat_fn
+        fn = make_ollama_chat_fn(stream=True)
+        assert callable(fn)

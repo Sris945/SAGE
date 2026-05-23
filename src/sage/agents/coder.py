@@ -268,6 +268,50 @@ class CoderAgent:
             "list above and reuse existing ones instead of reimplementing."
         )
 
+    @staticmethod
+    def _preload_files(task_desc: str, registry: "ToolRegistry", max_files: int = 4) -> str:
+        """
+        Grep-based pre-loading: find files relevant to the task and inject them
+        into context so the model skips wasteful 'read_file' turns at the start.
+        """
+        import re as _re
+
+        seen: dict[str, str] = {}   # path → content
+
+        def _read(path: str) -> None:
+            if path in seen or len(seen) >= max_files:
+                return
+            r = registry.dispatch({"tool": "read_file", "args": {"path": path}})
+            if r.success:
+                seen[path] = r.output
+
+        # 1. Explicit file paths in task description (negative lookbehind avoids matching URLs)
+        for fp in _re.findall(r'(?<!://)[\w./\-]+\.(?:py|ts|js|json|toml|yaml|yml|md)', task_desc):
+            _read(fp)
+
+        # 2. Grep for CamelCase class names and snake_case identifiers
+        if len(seen) < max_files:
+            keywords = list(dict.fromkeys(
+                _re.findall(r'\b([A-Z][a-zA-Z]{2,}|[a-z_]{4,})\b', task_desc)
+            ))
+            for kw in keywords[:6]:
+                if len(seen) >= max_files:
+                    break
+                gr = registry.dispatch({"tool": "grep_code", "args": {"pattern": kw}})
+                if not gr.success:
+                    continue
+                for line in gr.output.splitlines():
+                    parts = line.split(":", 1)
+                    if parts and any(parts[0].endswith(ext) for ext in ('.py', '.ts', '.js')):
+                        _read(parts[0])
+                        break
+
+        if not seen:
+            return ""
+
+        blocks = [f"### {p}\n```\n{c[:2500]}\n```" for p, c in seen.items()]
+        return "PRE-LOADED FILES (already read — do not call read_file for these):\n\n" + "\n\n".join(blocks)
+
     # ── Agentic loop mode ────────────────────────────────────────────────────
 
     def run_loop(
@@ -279,6 +323,8 @@ class CoderAgent:
         universal_prefix: str = "",
         insight_sink=None,
         max_turns: int = 24,
+        plan_mode: bool = False,
+        resume_from_checkpoint: bool = False,
     ) -> dict:
         """
         Agentic tool-use loop mode.  The model calls tools (read, grep, edit,
@@ -318,10 +364,39 @@ class CoderAgent:
              if k in ("codebase_brief", "sage_memory_summary", "project", "conventions")},
             indent=2,
         )
-        extra_ctx = self._build_conventions_context(session_memory) + \
-                    self._build_symbols_context(session_memory)
+        extra_ctx_parts = []
+        prior_failures = session_memory.get("prior_failure_context", "")
+        if prior_failures:
+            extra_ctx_parts.append(prior_failures)
+        conventions = self._build_conventions_context(session_memory)
+        if conventions:
+            extra_ctx_parts.append(conventions)
+        symbols = self._build_symbols_context(session_memory)
+        if symbols:
+            extra_ctx_parts.append(symbols)
+
+        # Context compression: inject only relevant code chunks
+        try:
+            from sage.memory.context_compressor import compress_context
+            compression = compress_context(task.get("description", ""))
+            compressed_block = compression.to_prompt_block()
+            if compressed_block:
+                extra_ctx_parts.append(compressed_block)
+        except Exception:
+            pass
+
+        extra_ctx = "\n\n".join(extra_ctx_parts)
 
         registry = ToolRegistry()
+
+        # Grep-based pre-loading: inject files mentioned in task before turn 1
+        try:
+            preloaded = self._preload_files(task.get("description", ""), registry)
+            if preloaded:
+                extra_ctx = (extra_ctx + "\n\n" + preloaded).strip() if extra_ctx else preloaded
+        except Exception:
+            pass
+
         system_prompt = build_system_prompt(
             task_description=task.get("description", ""),
             memory_context=memory_ctx,
@@ -331,20 +406,10 @@ class CoderAgent:
             extra_context=extra_ctx,
         )
 
-        # Use module-level chat_with_timeout so test patches apply correctly
-        def _coder_chat_fn(messages: list[dict], model: str, options: dict) -> str:
-            response = chat_with_timeout(
-                model=model,
-                messages=messages,
-                options=options,
-                timeout_s=None,
-            )
-            if isinstance(response, dict):
-                msg = response.get("message") or {}
-                if isinstance(msg, dict):
-                    return str(msg.get("content") or "")
-                return str(msg)
-            return str(response)
+        from sage.execution.tool_loop import make_ollama_chat_fn
+        from pathlib import Path as _Path
+        _coder_chat_fn = make_ollama_chat_fn(stream=True)
+        _checkpoint_path = _Path(".sage") / "loop_checkpoint.bin"
 
         engine = ToolLoopEngine(
             registry=registry,
@@ -352,6 +417,9 @@ class CoderAgent:
             model=model,
             max_turns=max_turns,
             temperature=temperature,
+            plan_mode=plan_mode,
+            checkpoint_path=_checkpoint_path,     # always save (crash recovery)
+            resume=resume_from_checkpoint,         # load only when explicitly resuming
         )
 
         print_agent_line("Coder", f"[loop] model={model} max_turns={max_turns}")
@@ -384,6 +452,7 @@ class CoderAgent:
                 "files_edited": loop_result.files_edited,
                 "commands_run": loop_result.commands_run,
                 "turns": loop_result.turns,
+                "tokens_used": loop_result.tokens_used,
             }
         else:
             print_agent_line("Coder", f"[loop] {loop_result.status}: {loop_result.error[:120]}")
@@ -395,6 +464,7 @@ class CoderAgent:
                 "error": loop_result.error,
                 "model_used": model,
                 "turns": loop_result.turns,
+                "tokens_used": loop_result.tokens_used,
             }
 
     # ── Main entry point ─────────────────────────────────────────────────────
@@ -407,6 +477,8 @@ class CoderAgent:
         failure_count: int = 0,
         universal_prefix: str = "",
         insight_sink=None,
+        plan_mode: bool = False,
+        resume_from_checkpoint: bool = False,
     ) -> dict:
         """
         Execute a coding task.
@@ -518,6 +590,8 @@ class CoderAgent:
                 temperature=temperature,
                 universal_prefix=universal_prefix,
                 insight_sink=insight_sink,
+                plan_mode=plan_mode,
+                resume_from_checkpoint=resume_from_checkpoint,
             )
 
         # ── Build context-enriched prompt ─────────────────────────────────────
@@ -544,6 +618,9 @@ class CoderAgent:
             system = system + conventions_ctx
         if symbols_ctx:
             system = system + symbols_ctx
+        prior_failures = session_memory.get("prior_failure_context", "")
+        if prior_failures:
+            system = system + f"\n\nPRIOR FAILURES:\n{prior_failures}"
 
         if universal_prefix:
             system = universal_prefix + "\n\n" + system
@@ -665,4 +742,5 @@ class CoderAgent:
             "model_used": model,
             "strategy_key": strategy_key,
             "epistemic_flags": patch_req.epistemic_flags,
+            "tokens_used": 0,
         }

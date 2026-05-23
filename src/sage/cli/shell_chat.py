@@ -154,17 +154,22 @@ def _read_paste_block(*, use_rich: bool) -> str:
 # ── Context compression ───────────────────────────────────────────────────────
 
 def _compress_history(messages: list[dict]) -> list[dict]:
-    """Drop oldest non-system turns when history grows large."""
+    """
+    Drop oldest non-system turns when history grows large.
+    Always preserves: the system message and the last 2 turns (most recent exchange).
+    """
     total = sum(len(str(m.get("content", ""))) for m in messages)
     if total <= _MAX_HISTORY_CHARS:
         return messages
     system = [m for m in messages if m["role"] == "system"]
     turns = [m for m in messages if m["role"] != "system"]
-    # Drop oldest pairs until under limit
-    while turns and total > _MAX_HISTORY_CHARS:
-        dropped = turns.pop(0)
+    # Protect last 2 messages (the most recent user + assistant pair)
+    protected = turns[-2:] if len(turns) >= 2 else turns[:]
+    droppable = turns[:-2] if len(turns) >= 2 else []
+    while droppable and total > _MAX_HISTORY_CHARS:
+        dropped = droppable.pop(0)
         total -= len(str(dropped.get("content", "")))
-    return system + turns
+    return system + droppable + protected
 
 
 # ── Model helper ──────────────────────────────────────────────────────────────
@@ -271,12 +276,12 @@ def run_shell_chat_loop(
     Multi-turn streaming chat until /back or /exit.
     Returns ``exit_shell`` when user quits SAGE entirely.
     """
-    from sage.cli.chat_session_store import append_turn, begin_chat_session
+    from sage.cli.chat_session_store import append_turn, begin_chat_session, load_messages_from_session
     from sage.cli.shell_input import read_shell_line
 
     os.environ["SAGE_SHELL_MODE"] = "chat"
     os.environ["SAGE_UI_MODE"] = "chat"
-    sid, _path = begin_chat_session(force_new=force_new, resume=resume)
+    sid, session_path = begin_chat_session(force_new=force_new, resume=resume)
     print_chat_enter_banner(use_rich=use_rich, session_id=sid)
 
     model = _router_model()
@@ -285,6 +290,16 @@ def run_shell_chat_loop(
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": _build_system_prompt()},
     ]
+    if resume:
+        prior = load_messages_from_session(session_path, max_chars=_MAX_HISTORY_CHARS)
+        if prior:
+            messages.extend(prior)
+            n_turns = sum(1 for m in prior if m["role"] == "user")
+            if use_rich:
+                from sage.cli.branding import get_console
+                get_console().print(f"  [dim]Resumed {n_turns} prior turn(s) from session #{sid[:8]}.[/dim]")
+            else:
+                print(f"[SAGE] Resumed {n_turns} turn(s) from session #{sid[:8]}.")
 
     def _do_turn(user_text: str) -> str:
         """Execute one streaming turn. Returns assistant text."""
@@ -337,6 +352,18 @@ def run_shell_chat_loop(
                 get_console().print("  [dim]History cleared.[/dim]")
             else:
                 print("[SAGE] History cleared.")
+            continue
+
+        if raw == "/history":
+            turns = [(m["role"], m["content"]) for m in messages if m["role"] != "system"]
+            if not turns:
+                print("[SAGE] No history yet.")
+            else:
+                for role, content in turns[-10:]:
+                    label = "You" if role == "user" else "SAGE"
+                    preview = content.strip()[:120]
+                    suffix = "…" if len(content.strip()) > 120 else ""
+                    print(f"  [{label}] {preview}{suffix}")
             continue
 
         if raw == "/paste":
@@ -401,6 +428,22 @@ def run_shell_chat_loop(
                 },
                 use_rich=use_rich,
             )
+            continue
+
+        if raw == "/compact":
+            before = len(messages)
+            messages[:] = _compress_history(messages)
+            after = len(messages)
+            dropped = before - after
+            if dropped > 0:
+                msg = f"Context compressed: {before} → {after} messages ({dropped} dropped)"
+            else:
+                msg = f"Context already compact ({before} messages, nothing to drop)"
+            if use_rich:
+                from sage.cli.branding import get_console
+                get_console().print(f"  [dim]{msg}[/dim]")
+            else:
+                print(f"[SAGE] {msg}")
             continue
 
         if raw.startswith("/"):

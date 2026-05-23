@@ -35,7 +35,8 @@ After **`sage run`** (including `/run` from the shell), the CLI prints a structu
 
 ```text
 sage run "your goal" [--research | --auto | --silent] [--no-clarify] [--plan-only] [--dry-run]
-                       [--repo PATH] [--explain-routing] [--fresh] [--include GLOB ...]
+                       [--plan] [--resume] [--repo PATH] [--explain-routing] [--fresh]
+                       [--include GLOB ...]
 ```
 
 | Mode / flag | Behavior |
@@ -45,7 +46,9 @@ sage run "your goal" [--research | --auto | --silent] [--no-clarify] [--plan-onl
 | **`--silent`** | Most autonomous; skips failed tasks per policy. |
 | **`--no-clarify`** | Planner does not ask TTY clarifying questions (`SAGE_NO_CLARIFY=1` same). |
 | **`--plan-only`** | Prints planner DAG and writes `.sage/last_plan.json`; no tool execution. |
+| **`--plan`** | Before the coder starts each task, the model proposes a step-by-step plan and waits for `y` / `n` (auto-proceeds when not a TTY). |
 | **`--dry-run`** | Does not apply file patches (verification may still run where applicable). |
+| **`--resume`** | Reload the loop checkpoint saved at `.sage/loop_checkpoint.bin` and continue from the last completed turn. No-ops if no checkpoint exists. |
 | **`--repo PATH`** | Point at an existing repo for codebase intelligence (indexing / retrieval). |
 | **`--explain-routing`** | After the run, print a routing decision summary for the session. |
 | **`--fresh`** | Ignore `memory/handoff.json` (no resume from interrupt snapshot). |
@@ -53,7 +56,17 @@ sage run "your goal" [--research | --auto | --silent] [--no-clarify] [--plan-onl
 
 Non-interactive automation: set **`SAGE_NON_INTERACTIVE=1`** so plan checkpoints default to approve without blocking on stdin.
 
-**Interrupt resume:** If `memory/handoff.json` exists, the next `sage run "your goal"` loads it unless you pass **`--fresh`**. (Some messages still say `sage run --resume`; there is no separate `--resume` flag.)
+**Interrupt resume:** If `memory/handoff.json` exists, the next `sage run "your goal"` loads it unless you pass **`--fresh`**. For mid-task loop resume, use **`--resume`** which reloads `.sage/loop_checkpoint.bin` (written after every tool turn and on Ctrl-C).
+
+### @file injection
+
+Embed file content directly in a prompt using `@path/to/file` syntax:
+
+```bash
+sage run "Refactor @src/api/auth.py to use JWT — see @docs/auth_spec.md"
+```
+
+Any token matching `@<path>.<ext>` is replaced with the file's content (up to 8 000 chars) before the run starts. Useful for attaching context files, specs, or examples without copy-pasting.
 
 ### Run / session environment (selection)
 
@@ -104,6 +117,38 @@ Commands:
 - `sage memory digest` — aggregate session logs + fix patterns into **`memory/weekly_digest.md`** (override with `--out`).
 
 Session state: **`memory/system_state.json`**. Handoff: **`memory/handoff.json`**.
+
+---
+
+## Shell commands (inside `sage` / `/`)
+
+| Command | What it does |
+|---------|-------------|
+| `/compact` | Compress the current conversation history in-place — keeps the last assistant message and a summary; frees context for long sessions. Prints `Context compressed: N → M messages`. |
+| `/history` | Show the last 10 turns of the current session (role + first 120 chars). |
+| `/clear` | Wipe the session history and start fresh. |
+| `/chat` | Open a multi-turn local LLM chat thread (saved under `.sage/chat_sessions/`). |
+| `/run <goal>` | Kick off `sage run` from inside the shell without opening a new terminal. |
+| `/commands` | Print all available slash commands with short descriptions. |
+
+---
+
+## `sage history`
+
+Query the task database for past runs:
+
+```text
+sage history [--days N] [--agent AGENT] [--status STATUS] [--limit N]
+```
+
+| Flag | Default | Effect |
+|------|---------|--------|
+| `--days N` | 7 | Look back N calendar days. |
+| `--agent AGENT` | all | Filter by agent name (`coder`, `reviewer`, …). |
+| `--status STATUS` | all | Filter by task status (`completed`, `failed`, `blocked`). |
+| `--limit N` | 50 | Maximum rows to show. |
+
+Output is a Rich table: task id, status (colour-coded), agent, description, timestamp.
 
 ---
 

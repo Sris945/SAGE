@@ -283,6 +283,104 @@ def cmd_init(args) -> None:
         )
 
 
+def cmd_undo(_args) -> None:
+    """Restore all files to their state before the last pipeline run."""
+    from sage.tools.tool_registry import ToolRegistry
+    workspace = Path.cwd()
+    manifest = workspace / ".sage" / "undo" / "manifest.json"
+    if not manifest.exists():
+        print("[SAGE] Nothing to undo — no undo manifest found in .sage/undo/")
+        return
+    try:
+        import json as _json
+        entries = _json.loads(manifest.read_text())
+    except Exception:
+        print("[SAGE undo] Could not read manifest.")
+        return
+    if not entries:
+        print("[SAGE] Nothing to undo.")
+        return
+    print(f"[SAGE] Undoing {len(entries)} file change(s)…")
+    restored = ToolRegistry.restore_undo_from_disk(workspace)
+    if restored:
+        for r in restored:
+            print(f"  ✓ {r}")
+        print(f"[SAGE] Undo complete. {len(restored)} file(s) restored.")
+    else:
+        print("[SAGE] Undo failed — could not restore files (check .sage/undo/).")
+
+
+def cmd_history(args) -> None:
+    """Show recent pipeline run history from memory/tasks.db."""
+    from sage.memory.sqlite_store import TaskStore
+
+    days = getattr(args, "days", 7)
+    agent_filter = getattr(args, "agent", None)
+    status_filter = getattr(args, "status", None)
+    limit = getattr(args, "limit", 25)
+
+    db_path = Path("memory") / "tasks.db"
+    if not db_path.exists():
+        print("[SAGE] No history found — memory/tasks.db does not exist yet.")
+        print("       Run `sage run` at least once to start logging.")
+        return
+
+    store = TaskStore(db_path)
+    rows = store.query(agent=agent_filter, status=status_filter, since_days=days)[:limit]
+
+    if not rows:
+        print(f"[SAGE] No runs found in the last {days} day(s).")
+        return
+
+    try:
+        from rich.table import Table
+        from rich import box
+        from sage.cli.branding import get_console
+
+        c = get_console()
+        t = Table(
+            title=f"Run history — last {days}d",
+            box=box.ROUNDED,
+            border_style="#4c566a",
+            header_style="bold #88c0d0",
+            show_lines=False,
+        )
+        t.add_column("Date", style="dim", no_wrap=True)
+        t.add_column("Task ID", style="cyan", no_wrap=True)
+        t.add_column("Agent", style="white")
+        t.add_column("Model", style="dim")
+        t.add_column("Status", no_wrap=True)
+        t.add_column("Error", style="dim")
+
+        _STATUS_STYLE = {
+            "completed": "[green]completed[/green]",
+            "failed": "[red]failed[/red]",
+            "error": "[red]error[/red]",
+            "patch_ready": "[yellow]patch_ready[/yellow]",
+        }
+
+        for row in rows:
+            status_str = _STATUS_STYLE.get(row["status"], row["status"])
+            date_str = (row["timestamp"] or "")[:10]
+            task_id_short = (row["task_id"] or "")[:36]
+            error_short = (row["error_preview"] or "")[:50]
+            t.add_row(date_str, task_id_short, row["agent"], row["model"],
+                      status_str, error_short)
+
+        c.print()
+        c.print(t)
+        c.print(f"  [dim]{len(rows)} record(s) shown (--limit {limit}, --days {days})[/dim]")
+        c.print()
+    except Exception:
+        # Plain fallback
+        header = f"{'Date':<12} {'Agent':<10} {'Status':<12} Task"
+        print(header)
+        print("-" * 70)
+        for row in rows:
+            date_str = (row["timestamp"] or "")[:10]
+            print(f"{date_str:<12} {row['agent']:<10} {row['status']:<12} {(row['task_id'] or '')[:40]}")
+
+
 def cmd_doctor(args) -> None:
     checks: dict[str, dict] = {}
 
@@ -521,6 +619,16 @@ def build_parser(*, exit_on_error: bool = True) -> argparse.ArgumentParser:
         dest="include_globs",
         help="Scope hint for the planner (repeatable); e.g. src/**/*.py README.md",
     )
+    run_p.add_argument(
+        "--plan",
+        action="store_true",
+        help="Show the agent's plan and ask for confirmation before executing.",
+    )
+    run_p.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume the last interrupted run from .sage/loop_checkpoint.bin.",
+    )
 
     sub.add_parser("status", help="Show current session state")
     sub.add_parser(
@@ -639,6 +747,14 @@ def build_parser(*, exit_on_error: bool = True) -> argparse.ArgumentParser:
         action="store_true",
         help="Overwrite .sage/rules.md if it already exists",
     )
+
+    sub.add_parser("undo", help="Undo all file changes from the last pipeline run")
+
+    hist_p = sub.add_parser("history", help="Show recent pipeline run history from tasks.db")
+    hist_p.add_argument("--days", type=int, default=7, help="Look back N days (default 7)")
+    hist_p.add_argument("--agent", default=None, help="Filter by agent name")
+    hist_p.add_argument("--status", default=None, help="Filter by status (completed/failed/error)")
+    hist_p.add_argument("--limit", type=int, default=25, help="Max rows to show (default 25)")
 
     doctor_p = sub.add_parser("doctor", help="Check environment/model readiness")
     doctor_p.add_argument("--json", action="store_true", help="Emit doctor report as JSON")
@@ -947,6 +1063,10 @@ def _dispatch_command_impl(args: argparse.Namespace, parser: argparse.ArgumentPa
             cmd_status(args)
         elif sc == "handoff":
             cmd_session_handoff(args)
+    elif args.command == "undo":
+        cmd_undo(args)
+    elif args.command == "history":
+        cmd_history(args)
     elif args.command == "doctor":
         cmd_doctor(args)
     elif args.command == "config":

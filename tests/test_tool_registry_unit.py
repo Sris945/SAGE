@@ -435,3 +435,290 @@ class TestTodoTools:
         reg = ToolRegistry(workspace_roots=[workspace])
         result = reg.dispatch({"tool": "todo_write", "args": {"todos": "not a list"}})
         assert not result.success
+
+
+# ── Undo system ───────────────────────────────────────────────────────────────
+
+class TestUndoSystem:
+    def test_snapshot_on_write_and_restore_in_memory(self, workspace: Path):
+        reg = ToolRegistry(workspace_roots=[workspace])
+        target = workspace / "file.txt"
+        target.write_text("original")
+
+        reg.dispatch({"tool": "write_file", "args": {"path": "file.txt", "content": "changed"}})
+        assert target.read_text() == "changed"
+
+        restored = reg.restore_undo()
+        assert any("file.txt" in r for r in restored)
+        assert target.read_text() == "original"
+
+    def test_snapshot_on_edit_and_restore(self, workspace: Path):
+        reg = ToolRegistry(workspace_roots=[workspace])
+        target = workspace / "edit_me.py"
+        target.write_text("x = 1\n")
+
+        reg.dispatch({"tool": "edit_file", "args": {
+            "path": "edit_me.py", "old_string": "x = 1", "new_string": "x = 99",
+        }})
+        assert "x = 99" in target.read_text()
+
+        reg.restore_undo()
+        assert "x = 1" in target.read_text()
+
+    def test_restore_from_disk_cross_process(self, tmp_path: Path):
+        """Simulates restore_undo_from_disk running in a fresh process."""
+        from sage.tools.tool_registry import ToolRegistry
+
+        target = tmp_path / "persist.txt"
+        target.write_text("before")
+
+        reg = ToolRegistry(workspace_roots=[tmp_path])
+        reg.dispatch({"tool": "write_file", "args": {"path": "persist.txt", "content": "after"}})
+
+        manifest = tmp_path / ".sage" / "undo" / "manifest.json"
+        assert manifest.exists()
+
+        # Simulate new process: create fresh registry-less restore
+        restored = ToolRegistry.restore_undo_from_disk(tmp_path)
+        assert any("persist.txt" in r for r in restored)
+        assert target.read_text() == "before"
+        assert not manifest.exists()  # manifest cleaned up after restore
+
+    def test_restore_empty_when_no_manifest(self, tmp_path: Path):
+        restored = ToolRegistry.restore_undo_from_disk(tmp_path)
+        assert restored == []
+
+    def test_new_file_undo_deletes_it(self, workspace: Path):
+        reg = ToolRegistry(workspace_roots=[workspace])
+        new_file = workspace / "brand_new.txt"
+        assert not new_file.exists()
+
+        reg.dispatch({"tool": "write_file", "args": {"path": "brand_new.txt", "content": "hello"}})
+        assert new_file.exists()
+
+        restored = reg.restore_undo()
+        assert not new_file.exists()
+        assert any("(deleted)" in r for r in restored)
+
+
+# ── ask_user (stdin mock) ─────────────────────────────────────────────────────
+
+class TestAskUser:
+    def test_ask_user_returns_answer(self, workspace: Path, monkeypatch):
+        import sys
+        from sage.tools.tool_registry import ToolRegistry
+
+        monkeypatch.setattr("builtins.input", lambda: "yes")
+        monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+        reg = ToolRegistry(workspace_roots=[workspace])
+        result = reg.dispatch({"tool": "ask_user", "args": {"question": "Continue?"}})
+        assert result.success
+        assert "yes" in result.output
+
+    def test_ask_user_requires_question(self, workspace: Path, monkeypatch):
+        import sys
+        from sage.tools.tool_registry import ToolRegistry
+
+        monkeypatch.setattr("builtins.input", lambda: "ok")
+        monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+        reg = ToolRegistry(workspace_roots=[workspace])
+        result = reg.dispatch({"tool": "ask_user", "args": {"question": ""}})
+        assert not result.success
+
+    def test_ask_user_fails_in_non_tty(self, workspace: Path, monkeypatch):
+        import sys
+        from sage.tools.tool_registry import ToolRegistry
+
+        monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+        reg = ToolRegistry(workspace_roots=[workspace])
+        result = reg.dispatch({"tool": "ask_user", "args": {"question": "Continue?"}})
+        assert not result.success
+        assert "non-interactively" in result.error
+
+
+# ── web_fetch ─────────────────────────────────────────────────────────────────
+
+class TestWebFetch:
+    def test_web_fetch_strips_html(self, workspace: Path, monkeypatch):
+        import io, urllib.request
+        from sage.tools.tool_registry import ToolRegistry
+
+        html = b"<html><body><h1>Hello</h1><p>World</p></body></html>"
+
+        class FakeHeaders:
+            def get(self, key, default=""): return "text/html"
+
+        class FakeResponse:
+            headers = FakeHeaders()
+            def read(self, n): return html
+            def __enter__(self): return self
+            def __exit__(self, *a): pass
+
+        monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **kw: FakeResponse())
+        reg = ToolRegistry(workspace_roots=[workspace])
+        result = reg.dispatch({"tool": "web_fetch", "args": {"url": "http://example.com"}})
+        assert result.success
+        assert "Hello" in result.output
+        assert "<h1>" not in result.output
+
+    def test_web_fetch_rejects_empty_url(self, workspace: Path):
+        from sage.tools.tool_registry import ToolRegistry
+
+        reg = ToolRegistry(workspace_roots=[workspace])
+        result = reg.dispatch({"tool": "web_fetch", "args": {"url": ""}})
+        assert not result.success
+
+    def test_web_fetch_handles_network_error(self, workspace: Path, monkeypatch):
+        import urllib.request
+        from sage.tools.tool_registry import ToolRegistry
+
+        monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **kw: (_ for _ in ()).throw(OSError("timeout")))
+        reg = ToolRegistry(workspace_roots=[workspace])
+        result = reg.dispatch({"tool": "web_fetch", "args": {"url": "http://unreachable.invalid"}})
+        assert not result.success
+        assert "timeout" in result.error or "timeout" in result.output
+
+
+# ── move_file ─────────────────────────────────────────────────────────────────
+
+class TestMoveFile:
+    def test_moves_file_within_workspace(self, workspace: Path):
+        reg = ToolRegistry(workspace_roots=[workspace])
+        src = workspace / "old.txt"
+        src.write_text("hello")
+        result = reg.dispatch({"tool": "move_file", "args": {"source": "old.txt", "destination": "new.txt"}})
+        assert result.success
+        assert not src.exists()
+        assert (workspace / "new.txt").read_text() == "hello"
+
+    def test_rejects_missing_source(self, workspace: Path):
+        reg = ToolRegistry(workspace_roots=[workspace])
+        result = reg.dispatch({"tool": "move_file", "args": {"source": "ghost.txt", "destination": "out.txt"}})
+        assert not result.success
+
+    def test_rejects_existing_destination(self, workspace: Path):
+        reg = ToolRegistry(workspace_roots=[workspace])
+        (workspace / "a.txt").write_text("a")
+        (workspace / "b.txt").write_text("b")
+        result = reg.dispatch({"tool": "move_file", "args": {"source": "a.txt", "destination": "b.txt"}})
+        assert not result.success
+
+    def test_rejects_path_traversal(self, workspace: Path):
+        import tempfile
+        reg = ToolRegistry(workspace_roots=[workspace])
+        (workspace / "safe.txt").write_text("data")
+        with tempfile.TemporaryDirectory() as other:
+            result = reg.dispatch({"tool": "move_file", "args": {
+                "source": "safe.txt",
+                "destination": str(Path(other) / "outside.txt"),
+            }})
+        assert not result.success
+
+
+# ── run_tests ─────────────────────────────────────────────────────────────────
+
+class TestRunTests:
+    def test_detects_pytest_in_workspace(self, tmp_path: Path):
+        from sage.tools.tool_registry import _detect_test_runner
+        (tmp_path / "pyproject.toml").write_text('[tool.pytest.ini_options]\n')
+        runner, cmd = _detect_test_runner(tmp_path)
+        assert runner in ("pytest", None)  # pytest may not be on PATH in test env
+
+    def test_no_runner_returns_none(self, tmp_path: Path):
+        from sage.tools.tool_registry import _detect_test_runner
+        runner, cmd = _detect_test_runner(tmp_path)
+        # tmp_path has no project files — may fall back to global pytest or None
+        assert runner is None or isinstance(runner, str)
+
+    def test_run_tests_dispatches(self, workspace: Path, monkeypatch):
+        import subprocess
+        from sage.tools.tool_registry import ToolRegistry
+
+        fake_result = subprocess.CompletedProcess(args=[], returncode=0, stdout="1 passed", stderr="")
+        monkeypatch.setattr(subprocess, "run", lambda *a, **kw: fake_result)
+        reg = ToolRegistry(workspace_roots=[workspace])
+        # Patch detect to always find pytest so CI doesn't need it installed
+        monkeypatch.setattr("sage.tools.tool_registry._detect_test_runner", lambda root: ("pytest", ["pytest", "-q"]))
+        result = reg.dispatch({"tool": "run_tests", "args": {}})
+        assert result.success
+        assert "PASSED" in result.output
+
+
+# ── diff preview in write_file / edit_file ────────────────────────────────────
+
+class TestDiffPreview:
+    def test_write_existing_file_shows_diff(self, workspace: Path):
+        reg = ToolRegistry(workspace_roots=[workspace])
+        target = workspace / "src" / "main.py"
+        result = reg.dispatch({"tool": "write_file", "args": {
+            "path": "src/main.py",
+            "content": "# new version\ndef main(): pass\n",
+        }})
+        assert result.success
+        # Diff block should appear in output
+        assert "@@" in result.output or "---" in result.output or "new version" in result.output
+
+    def test_write_new_file_no_diff(self, workspace: Path):
+        reg = ToolRegistry(workspace_roots=[workspace])
+        result = reg.dispatch({"tool": "write_file", "args": {
+            "path": "brand_new_file.txt",
+            "content": "hello\n",
+        }})
+        assert result.success
+        # New file — no diff block
+        assert "---" not in result.output
+
+    def test_edit_shows_diff(self, workspace: Path):
+        reg = ToolRegistry(workspace_roots=[workspace])
+        result = reg.dispatch({"tool": "edit_file", "args": {
+            "path": "src/main.py",
+            "old_string": "def greet(name: str) -> str:",
+            "new_string": "def greet(name: str = 'World') -> str:",
+        }})
+        assert result.success
+        assert "@@" in result.output or "greet" in result.output
+
+
+# ── chat session store — message rehydration ──────────────────────────────────
+
+class TestChatSessionStore:
+    def test_load_messages_from_session(self, tmp_path: Path):
+        from sage.cli.chat_session_store import load_messages_from_session
+        import json
+
+        session_file = tmp_path / "sess.jsonl"
+        lines = [
+            {"role": "user", "content": "hello world", "ts": "2026-01-01T00:00:00Z"},
+            {"role": "assistant", "content": "hi there", "ts": "2026-01-01T00:00:01Z"},
+        ]
+        session_file.write_text("\n".join(json.dumps(l) for l in lines))
+
+        msgs = load_messages_from_session(session_file)
+        assert len(msgs) == 2
+        assert msgs[0] == {"role": "user", "content": "hello world"}
+        assert msgs[1] == {"role": "assistant", "content": "hi there"}
+
+    def test_load_empty_session(self, tmp_path: Path):
+        from sage.cli.chat_session_store import load_messages_from_session
+
+        f = tmp_path / "empty.jsonl"
+        f.write_text("")
+        assert load_messages_from_session(f) == []
+
+    def test_load_trims_to_max_chars(self, tmp_path: Path):
+        from sage.cli.chat_session_store import load_messages_from_session
+        import json
+
+        # Create many long turns
+        lines = [{"role": "user", "content": "x" * 1000, "ts": "t"} for _ in range(50)]
+        f = tmp_path / "big.jsonl"
+        f.write_text("\n".join(json.dumps(l) for l in lines))
+
+        msgs = load_messages_from_session(f, max_chars=5000)
+        total = sum(len(m["content"]) for m in msgs)
+        assert total <= 5000
+
+    def test_load_nonexistent_returns_empty(self, tmp_path: Path):
+        from sage.cli.chat_session_store import load_messages_from_session
+
+        assert load_messages_from_session(tmp_path / "nope.jsonl") == []

@@ -42,8 +42,13 @@ Five static assets live in [`images/`](images/) (`Commands`, `Memory`, `Model`, 
 |--|--|
 | **Run the full pipeline** | `sage run "Add JWT auth to the API"` — planner → DAG → code → review → tests → verify → memory. |
 | **Human checkpoints** | Default **`--research`**: review the plan (`a` / `r` / `e` for approve / reject / edit plan file), then continue. **`--auto`** — fewer interactive gates; **`--silent`** — autonomous, skips failed tasks. **`--no-clarify`** skips planner Q&A. |
+| **Plan mode** | `--plan` asks the coder model to propose a step-by-step plan before touching any files; confirm with `y` or abort with `n`. |
+| **Checkpoint & resume** | The tool-use loop saves a checkpoint to `.sage/loop_checkpoint.bin` after every turn and on Ctrl-C. Resume with `sage run --resume "…"`. |
+| **@file injection** | Embed file content in your prompt: `sage run "Refactor @src/api.py per @docs/spec.md"` — files are inlined before the run starts (up to 8 000 chars each). |
+| **Streaming output** | The coder's LLM output streams token-by-token to stdout so you see progress in real time instead of waiting for a full response. |
 | **Bootstrap a project folder** | `sage init` — creates `.sage/`, `memory/`, default rules, `pytest.ini` hints. Run it **in the repo you want SAGE to edit** (not necessarily the SAGE source tree). |
-| **Use the interactive shell** | Run `sage` with no args — `/` opens a command menu, `/chat` starts a local LLM thread (saved under `.sage/chat_sessions/`). |
+| **Use the interactive shell** | Run `sage` with no args — `/` opens a command menu, `/chat` starts a local LLM thread, `/compact` compresses history to free context, `/history` shows recent turns. |
+| **Task history** | `sage history [--days N] [--agent A] [--status S]` — Rich table of past task runs from the local task DB. |
 | **Configure models** | Per-role primary/fallback: **`~/.config/sage/models.yaml`** (or `$SAGE_MODELS_YAML`), or bundled defaults — see **`docs/models.md`**. |
 | **Rules & memory** | `sage rules` / `sage rules validate` / `sage rules add "…"`; `sage memory` / `sage memory digest` — see **`docs/CLI.md`**. |
 | **Benchmark & RL** | `sage bench`; `sage rl export`, `train-bc`, `train-cql`; `scripts/train_routing_policy.py` — see **`docs/getting_started.md`**. |
@@ -106,6 +111,7 @@ sage run "Create src/hello.py with greet() and tests/test_hello.py" --auto
 
 - **`SAGE_MODEL_PROFILE=test`** — forces the test profile in bundled/user `models.yaml` (good when you want a single small local model).
 - After each run, metrics are written to **`.sage/last_run_metrics.json`** (session id, task counts, model histogram, etc.). Set **`SAGE_RUN_OUTPUT=full`** for more detail in the end-of-run report; **`debug`** prints verbose verify lines.
+- The end-of-run **Outcome** panel shows total **tokens used** (`~12.3k`) accumulated across all coder turns.
 
 Full env reference → **[`docs/CLI.md`](docs/CLI.md)**. Install details → **[`docs/INSTALL.md`](docs/INSTALL.md)**.
 

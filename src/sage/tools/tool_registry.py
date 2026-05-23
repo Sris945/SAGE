@@ -29,6 +29,24 @@ from typing import Any, Callable
 from sage.execution.workspace_policy import path_is_under_workspace
 
 
+# ── Undo helpers (module-level; called from ToolRegistry and cmd_undo) ────────
+
+def _clear_undo_manifest(undo_dir: Path) -> None:
+    """Remove all blobs and reset the manifest after a successful restore."""
+    try:
+        manifest_path = undo_dir / "manifest.json"
+        if manifest_path.exists():
+            import json as _json
+            entries: list[dict] = _json.loads(manifest_path.read_text())
+            for entry in entries:
+                blob = undo_dir / entry["blob"]
+                if blob.exists():
+                    blob.unlink()
+            manifest_path.unlink()
+    except OSError:
+        pass
+
+
 # ── Tool result ───────────────────────────────────────────────────────────────
 
 @dataclass
@@ -76,7 +94,10 @@ class ToolRegistry:
         )
         self._tools: dict[str, ToolDescriptor] = {}
         self._todos: list[dict] = []
+        self._undo_snapshots: list[dict] = []   # [{path, original_bytes, existed}]
         self._register_all()
+        # Clear any stale undo manifest left by a previous crashed run
+        _clear_undo_manifest(self._roots[0] / ".sage" / "undo")
 
     # ── Public ────────────────────────────────────────────────────────────────
 
@@ -88,6 +109,7 @@ class ToolRegistry:
                 f'"{k}": {v}' for k, v in t.args_schema.items()
             )
             lines.append(f'  {{"tool": "{t.name}", "args": {{{args_desc}}}}}\n  → {t.description}\n')
+        lines.append('  {"tool": "done", "args": {"summary": "optional completion note"}}\n  → Signal that the task is complete. Call this when all changes are made and tested.\n')
         return "\n".join(lines)
 
     def dispatch(self, call: dict[str, Any]) -> ToolResult:
@@ -272,6 +294,77 @@ class ToolRegistry:
             args_schema={},
             handler=self._todo_read,
         ))
+        self._register(ToolDescriptor(
+            name="ask_user",
+            description=(
+                "Pause execution and ask the human a question. Use when you cannot proceed "
+                "without knowing the user's intent, preference, or a fact you cannot infer. "
+                "Returns the user's typed answer."
+            ),
+            args_schema={
+                "question": "the question to ask the user (string)",
+            },
+            handler=self._ask_user,
+        ))
+        self._register(ToolDescriptor(
+            name="web_fetch",
+            description=(
+                "Fetch the content of a public URL (documentation, API reference, GitHub raw file, "
+                "etc.) and return the text. HTML is stripped to plain text. "
+                "Max 12 000 chars returned."
+            ),
+            args_schema={
+                "url": "the URL to fetch (string, must start with http:// or https://)",
+                "max_chars": "maximum characters to return (int, default 12000)",
+            },
+            handler=self._web_fetch,
+        ))
+        self._register(ToolDescriptor(
+            name="move_file",
+            description="Move or rename a file within the workspace.",
+            args_schema={
+                "source": "current file path (string)",
+                "destination": "new file path (string)",
+            },
+            handler=self._move_file,
+            dangerous=True,
+        ))
+        self._register(ToolDescriptor(
+            name="create_directory",
+            description="Create a directory (and any missing parents) within the workspace.",
+            args_schema={"path": "directory path to create (string)"},
+            handler=self._create_directory,
+        ))
+        self._register(ToolDescriptor(
+            name="append_file",
+            description="Append text to the end of a file (creates the file if it does not exist).",
+            args_schema={
+                "path": "file path (string)",
+                "content": "text to append (string)",
+            },
+            handler=self._append_file,
+        ))
+        self._register(ToolDescriptor(
+            name="git_log",
+            description="Show recent git commits. Returns one-line log with hash, author, date, message.",
+            args_schema={
+                "n": "number of commits to show (int, default 10)",
+                "path": "limit to commits touching this file/dir (optional)",
+            },
+            handler=self._git_log,
+        ))
+        self._register(ToolDescriptor(
+            name="run_tests",
+            description=(
+                "Auto-detect and run the project's test suite (pytest, npm test, cargo test, etc.). "
+                "Optionally scope to a specific path or pattern. Returns pass/fail summary."
+            ),
+            args_schema={
+                "path": "test file or directory to scope (optional, default runs all)",
+                "extra_args": "additional CLI flags to pass to the test runner (optional)",
+            },
+            handler=self._run_tests,
+        ))
 
     # ── Handlers ─────────────────────────────────────────────────────────────
 
@@ -374,15 +467,115 @@ class ToolRegistry:
             return ToolResult("grep_code", True, f"(no matches for {pattern!r} in {include} under {root})")
         return ToolResult("grep_code", True, "\n".join(results))
 
+    def _undo_dir(self) -> Path:
+        """Return the persistent undo directory, creating it if needed."""
+        d = self._roots[0] / ".sage" / "undo"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def _snapshot_for_undo(self, p: Path) -> None:
+        """Save current file state before a destructive operation (in-memory + disk)."""
+        import base64, json as _json
+        snap: dict
+        if p.exists():
+            try:
+                data = p.read_bytes()
+                snap = {"path": str(p), "original": data, "existed": True}
+            except OSError:
+                return
+        else:
+            snap = {"path": str(p), "original": b"", "existed": False}
+        self._undo_snapshots.append(snap)
+        # Persist to disk so `sage undo` works across process boundaries
+        try:
+            undo_dir = self._undo_dir()
+            manifest_path = undo_dir / "manifest.json"
+            existing: list[dict] = []
+            if manifest_path.exists():
+                try:
+                    existing = _json.loads(manifest_path.read_text())
+                except Exception:
+                    existing = []
+            import hashlib
+            path_hash = hashlib.md5(str(p).encode()).hexdigest()[:8]
+            blob_name = f"{len(existing):04d}_{path_hash}_{p.name}"
+            blob_path = undo_dir / blob_name
+            blob_path.write_bytes(snap["original"])
+            existing.append({
+                "path": str(p),
+                "blob": blob_name,
+                "existed": snap["existed"],
+            })
+            manifest_path.write_text(_json.dumps(existing, indent=2))
+        except OSError:
+            pass
+
+    def restore_undo(self) -> list[str]:
+        """Restore all snapshots from the most recent batch. Returns list of paths restored."""
+        restored: list[str] = []
+        for snap in reversed(self._undo_snapshots):
+            p = Path(snap["path"])
+            try:
+                if snap["existed"]:
+                    p.write_bytes(snap["original"])
+                    restored.append(str(p))
+                elif p.exists():
+                    p.unlink()
+                    restored.append(f"(deleted) {p}")
+            except OSError:
+                pass
+        self._undo_snapshots.clear()
+        _clear_undo_manifest(self._undo_dir())
+        return restored
+
+    @staticmethod
+    def restore_undo_from_disk(workspace_root: Path) -> list[str]:
+        """
+        Restore files from the on-disk undo manifest.
+        Used by `sage undo` which runs in a fresh process with no in-memory snapshots.
+        """
+        import json as _json
+        undo_dir = workspace_root / ".sage" / "undo"
+        manifest_path = undo_dir / "manifest.json"
+        if not manifest_path.exists():
+            return []
+        try:
+            entries: list[dict] = _json.loads(manifest_path.read_text())
+        except Exception:
+            return []
+        restored: list[str] = []
+        for entry in reversed(entries):
+            p = Path(entry["path"])
+            blob_path = undo_dir / entry["blob"]
+            try:
+                if entry["existed"]:
+                    data = blob_path.read_bytes() if blob_path.exists() else b""
+                    p.write_bytes(data)
+                    restored.append(str(p))
+                elif p.exists():
+                    p.unlink()
+                    restored.append(f"(deleted) {p}")
+            except OSError:
+                pass
+        _clear_undo_manifest(undo_dir)
+        return restored
+
+
     def _write_file(self, path: str, content: str) -> ToolResult:
         p = self._resolve(path)
         if p is None:
             return ToolResult("write_file", False, "", f"Path outside workspace: {path!r}")
         try:
+            old_text = p.read_text(encoding="utf-8", errors="replace") if p.exists() else None
+            self._snapshot_for_undo(p)
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(content, encoding="utf-8")
             lines = content.count("\n") + 1
-            return ToolResult("write_file", True, f"Wrote {lines} lines to {path}")
+            diff_block = _make_diff(old_text, content, path) if old_text is not None else ""
+            detail = f"Wrote {lines} lines to {path}"
+            if diff_block:
+                detail += f"\n{diff_block}"
+            return ToolResult("write_file", True, detail)
         except OSError as exc:
             return ToolResult("write_file", False, "", str(exc))
 
@@ -418,23 +611,25 @@ class ToolRegistry:
 
         new_content = original.replace(old_string, new_string, 1)
         try:
+            self._snapshot_for_undo(p)
             p.write_text(new_content, encoding="utf-8")
         except OSError as exc:
             return ToolResult("edit_file", False, "", str(exc))
 
-        # Report the diff compactly
         old_lines = old_string.count("\n") + 1
         new_lines = new_string.count("\n") + 1
-        return ToolResult(
-            "edit_file", True,
-            f"Replaced {old_lines}-line block with {new_lines}-line block in {path}",
-        )
+        diff_block = _make_diff(original, new_content, path)
+        detail = f"Replaced {old_lines}-line block with {new_lines}-line block in {path}"
+        if diff_block:
+            detail += f"\n{diff_block}"
+        return ToolResult("edit_file", True, detail)
 
     def _delete_file(self, path: str) -> ToolResult:
         p = self._resolve(path, must_exist=True)
         if p is None:
             return ToolResult("delete_file", False, "", f"Not found or outside workspace: {path!r}")
         try:
+            self._snapshot_for_undo(p)
             p.unlink()
             return ToolResult("delete_file", True, f"Deleted {path}")
         except OSError as exc:
@@ -548,7 +743,7 @@ class ToolRegistry:
     ) -> ToolResult:
         if not old_string:
             return ToolResult("search_replace", False, "", "old_string must not be empty")
-        base = Path(root).resolve() if root != "." else self._roots[0]
+        base = self._roots[0] if not root or root == "." else Path(root).resolve()
         if not path_is_under_workspace(base, self._roots):
             return ToolResult("search_replace", False, "", f"root outside workspace: {root}")
         replacements = 0
@@ -565,6 +760,7 @@ class ToolRegistry:
             count = original.count(old_string)
             if count == 0:
                 continue
+            self._snapshot_for_undo(path)
             path.write_text(original.replace(old_string, new_string), encoding="utf-8")
             replacements += count
             changed_files.append(str(path.relative_to(base)))
@@ -598,6 +794,197 @@ class ToolRegistry:
             return ToolResult("todo_read", True, "(no todos yet)")
         lines = [_fmt_todo(t) for t in self._todos]
         return ToolResult("todo_read", True, "\n".join(lines))
+
+    def _ask_user(self, question: str) -> ToolResult:
+        if not question or not question.strip():
+            return ToolResult("ask_user", False, "", "question must not be empty")
+        import sys
+        q = question.strip()
+        # Print prominently so it's unmissable
+        try:
+            from sage.cli.branding import get_console
+            get_console().print(f"\n[bold #fbbf24][SAGE asks][/bold #fbbf24] {q}")
+            get_console().print("[dim]Your answer:[/dim] ", end="")
+        except Exception:
+            print(f"\n[SAGE asks] {q}\nYour answer: ", end="", flush=True)
+        import sys
+        if not sys.stdin.isatty():
+            return ToolResult("ask_user", False, "",
+                              "ask_user requires an interactive terminal — running non-interactively. "
+                              "Use run_command or proceed with available information.")
+        try:
+            answer = input().strip()
+        except (EOFError, KeyboardInterrupt):
+            return ToolResult("ask_user", False, "",
+                              "User cancelled input — proceed with available information.")
+        if not answer:
+            return ToolResult("ask_user", True, "(no answer provided — proceed with best judgment)")
+        return ToolResult("ask_user", True, f"User answered: {answer}")
+
+    def _web_fetch(self, url: str, max_chars: int | str = 12000) -> ToolResult:
+        import urllib.request
+        import urllib.error
+        import re as _re
+
+        url = (url or "").strip()
+        if not url.startswith(("http://", "https://")):
+            return ToolResult("web_fetch", False, "", f"URL must start with http:// or https://: {url!r}")
+        # SSRF protection: block private/link-local ranges
+        try:
+            from urllib.parse import urlparse
+            import ipaddress
+            host = urlparse(url).hostname or ""
+            try:
+                addr = ipaddress.ip_address(host)
+                if addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_reserved:
+                    return ToolResult("web_fetch", False, "", f"Blocked: private/loopback address {host!r}")
+            except ValueError:
+                # hostname — reject known local names
+                if host.lower() in ("localhost", "localhos", "") or host.endswith(".local"):
+                    return ToolResult("web_fetch", False, "", f"Blocked: local hostname {host!r}")
+        except Exception:
+            pass
+        try:
+            max_c = int(max_chars)
+        except (TypeError, ValueError):
+            max_c = 12000
+        max_c = max(500, min(max_c, 32000))
+
+        try:
+            req = urllib.request.Request(
+                url,
+                headers={
+                    "User-Agent": "SAGE/1.0 (coding-agent; +https://github.com/sage-project/sage)",
+                    "Accept": "text/html,text/plain,application/json,*/*",
+                    "Accept-Encoding": "gzip, deflate",
+                },
+            )
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                content_type = resp.headers.get("Content-Type", "")
+                encoding = resp.headers.get("Content-Encoding", "").lower()
+                raw = resp.read(max_c * 6)
+            # Decompress if needed (urllib doesn't auto-decompress)
+            if encoding == "gzip":
+                import gzip as _gzip
+                try:
+                    raw = _gzip.decompress(raw)
+                except Exception:
+                    pass
+            elif encoding == "deflate":
+                import zlib as _zlib
+                try:
+                    raw = _zlib.decompress(raw)
+                except Exception:
+                    pass
+            # Detect charset from Content-Type, fallback to UTF-8
+            charset = "utf-8"
+            for part in content_type.split(";"):
+                part = part.strip()
+                if part.lower().startswith("charset="):
+                    charset = part[8:].strip().strip('"') or "utf-8"
+            text = raw.decode(charset, errors="replace")
+        except urllib.error.HTTPError as exc:
+            return ToolResult("web_fetch", False, "", f"HTTP {exc.code}: {exc.reason}")
+        except Exception as exc:
+            return ToolResult("web_fetch", False, "", str(exc))
+
+        if "html" in content_type.lower() or text.lstrip().startswith("<"):
+            # Strip <style>, <script>, tags; collapse whitespace
+            text = _re.sub(r"(?is)<style[^>]*>.*?</style>", "", text)
+            text = _re.sub(r"(?is)<script[^>]*>.*?</script>", "", text)
+            text = _re.sub(r"<[^>]+>", " ", text)
+            text = _re.sub(r"[ \t]+", " ", text)
+            text = _re.sub(r"\n{3,}", "\n\n", text)
+            text = text.strip()
+
+        result = text[:max_c]
+        return ToolResult(
+            "web_fetch", True,
+            f"[{url}] ({len(result)} chars)\n\n{result}",
+        )
+
+    def _move_file(self, source: str, destination: str) -> ToolResult:
+        src = self._resolve(source, must_exist=True)
+        if src is None:
+            return ToolResult("move_file", False, "", f"Source not found or outside workspace: {source!r}")
+        dst = self._resolve(destination)
+        if dst is None:
+            return ToolResult("move_file", False, "", f"Destination outside workspace: {destination!r}")
+        if dst.exists():
+            return ToolResult("move_file", False, "", f"Destination already exists: {destination!r}")
+        try:
+            self._snapshot_for_undo(src)
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            src.rename(dst)
+            return ToolResult("move_file", True, f"Moved {source} → {destination}")
+        except OSError as exc:
+            return ToolResult("move_file", False, "", str(exc))
+
+    def _create_directory(self, path: str) -> ToolResult:
+        p = self._resolve(path)
+        if p is None:
+            return ToolResult("create_directory", False, "", f"Path outside workspace: {path!r}")
+        try:
+            p.mkdir(parents=True, exist_ok=True)
+            return ToolResult("create_directory", True, f"Created directory: {path}")
+        except OSError as exc:
+            return ToolResult("create_directory", False, "", str(exc))
+
+    def _append_file(self, path: str, content: str) -> ToolResult:
+        p = self._resolve(path)
+        if p is None:
+            return ToolResult("append_file", False, "", f"Path outside workspace: {path!r}")
+        try:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            with p.open("a", encoding="utf-8") as f:
+                f.write(content)
+            return ToolResult("append_file", True, f"Appended {len(content)} chars to {path}")
+        except OSError as exc:
+            return ToolResult("append_file", False, "", str(exc))
+
+    def _git_log(self, n: int | str = 10, path: str = "") -> ToolResult:
+        try:
+            count = max(1, min(int(n), 50))
+        except (TypeError, ValueError):
+            count = 10
+        cmd = [
+            "git", "log", f"--max-count={count}",
+            "--pretty=format:%h %ad %an | %s", "--date=short",
+        ]
+        if path and path.strip():
+            cmd += ["--", path.strip()]
+        cwd = str(next(iter(self._roots), Path.cwd()))
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=10, cwd=cwd)
+            out = r.stdout.strip() or "(no commits found)"
+            return ToolResult("git_log", True, out)
+        except Exception as exc:
+            return ToolResult("git_log", False, "", str(exc))
+
+    def _run_tests(self, path: str = "", extra_args: str = "") -> ToolResult:
+        """Auto-detect test runner and execute tests."""
+        root = self._roots[0]
+        runner, base_cmd = _detect_test_runner(root)
+        if runner is None:
+            return ToolResult("run_tests", False, "", "No test runner detected (no pytest/package.json/Cargo.toml/go.mod found)")
+        cmd: list[str] = base_cmd.copy()
+        if path and path.strip():
+            cmd.append(path.strip())
+        if extra_args and extra_args.strip():
+            cmd.extend(extra_args.split())
+        try:
+            r = subprocess.run(
+                cmd, capture_output=True, text=True,
+                timeout=120, cwd=str(root),
+            )
+            out = (r.stdout + r.stderr)[:6000]
+            success = r.returncode == 0
+            status = "PASSED" if success else f"FAILED (exit {r.returncode})"
+            return ToolResult("run_tests", success, f"[{runner}] {status}\n\n{out}")
+        except subprocess.TimeoutExpired:
+            return ToolResult("run_tests", False, "", "Test run timed out after 120s")
+        except OSError as exc:
+            return ToolResult("run_tests", False, "", str(exc))
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -642,3 +1029,52 @@ def _fmt_todo(todo: dict) -> str:
     icons = {"done": "[x]", "in_progress": "[~]", "pending": "[ ]"}
     icon = icons.get(todo.get("status", "pending"), "[ ]")
     return f"{icon} {todo.get('id', '?')}. {todo.get('text', '')}"
+
+
+def _detect_test_runner(root: Path) -> tuple[str | None, list[str]]:
+    """
+    Return (runner_name, base_command) for the project at root.
+    Priority: pytest > npm test > cargo test > go test.
+    """
+    import shutil
+    # Python / pytest
+    if (root / "pytest.ini").exists() or (root / "pyproject.toml").exists() or (root / "setup.py").exists():
+        if shutil.which("pytest"):
+            return "pytest", ["pytest", "-q", "--tb=short"]
+    # Node / npm
+    if (root / "package.json").exists() and shutil.which("npm"):
+        return "npm", ["npm", "test", "--"]
+    # Rust / cargo
+    if (root / "Cargo.toml").exists() and shutil.which("cargo"):
+        return "cargo", ["cargo", "test"]
+    # Go
+    if (root / "go.mod").exists() and shutil.which("go"):
+        return "go", ["go", "test", "./..."]
+    # Fallback: look for pytest even without config
+    if shutil.which("pytest"):
+        return "pytest", ["pytest", "-q", "--tb=short"]
+    return None, []
+
+
+def _make_diff(old: str, new: str, path: str, max_lines: int = 40) -> str:
+    """
+    Return a compact unified diff string (capped at max_lines).
+    Returns empty string when content is identical.
+    """
+    import difflib
+    if old == new:
+        return ""
+    old_lines = old.splitlines(keepends=True)
+    new_lines = new.splitlines(keepends=True)
+    diff = list(difflib.unified_diff(
+        old_lines, new_lines,
+        fromfile=f"a/{path}", tofile=f"b/{path}",
+        lineterm="",
+    ))
+    if not diff:
+        return ""
+    truncated = diff[:max_lines]
+    result = "\n".join(truncated)
+    if len(diff) > max_lines:
+        result += f"\n... ({len(diff) - max_lines} more diff lines)"
+    return result

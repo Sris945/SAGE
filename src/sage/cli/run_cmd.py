@@ -27,6 +27,24 @@ from sage.cli.log_utils import print_routing_summary_for_session
 from sage.version import get_version
 
 
+def _expand_at_files(text: str, cwd: Path) -> str:
+    """Replace @path/to/file mentions with their content inline."""
+    import re
+
+    def _sub(m: re.Match) -> str:
+        path_str = m.group(1)
+        p = (cwd / path_str).resolve()
+        if p.exists() and p.is_file():
+            try:
+                content = p.read_text(errors="replace")[:8_000]
+                return f"@{path_str}:\n```\n{content}\n```"
+            except Exception:
+                pass
+        return m.group(0)  # leave unchanged if file not found or unreadable
+
+    return re.sub(r"@([\w./\-]+\.\w+)", _sub, text)
+
+
 def _install_interrupt_handler(state_ref: list, session_manager) -> None:
     """Install SIGINT/SIGTERM handler that writes handoff.json before exit."""
 
@@ -124,10 +142,27 @@ def cmd_run(args) -> None:
     os.environ["SAGE_WORKSPACE_ROOT"] = str(Path.cwd().resolve())
 
     prompt_in = getattr(args, "prompt", "") or ""
+
+    # --resume: verify checkpoint exists before doing anything else
+    resuming = bool(getattr(args, "resume", False))
+    _checkpoint_path = Path(".sage") / "loop_checkpoint.bin"
+    if resuming:
+        if not Path(".sage").is_dir():
+            print("[SAGE] .sage/ directory not found — run 'sage init' first.")
+            return
+        if not _checkpoint_path.exists():
+            print("[SAGE] No checkpoint found at .sage/loop_checkpoint.bin — nothing to resume.")
+            return
+
     if isinstance(prompt_in, str) and prompt_in:
         from sage.cli.chat_session_store import maybe_prepend_chat_transcript
 
         prompt_in = maybe_prepend_chat_transcript(prompt_in)
+
+    # @file injection: expand @path/to/file mentions in the full prompt
+    # (applied after transcript prepend so @mentions in saved chat are also expanded)
+    if prompt_in:
+        prompt_in = _expand_at_files(prompt_in, Path.cwd())
 
     mode = "auto" if args.auto else ("silent" if args.silent else "research")
     clarify = not getattr(args, "no_clarify", False)
@@ -169,6 +204,8 @@ def cmd_run(args) -> None:
         "skip_handoff": bool(getattr(args, "fresh", False)),
         "plan_only": bool(getattr(args, "plan_only", False)),
         "dry_run": bool(getattr(args, "dry_run", False)),
+        "plan_mode": bool(getattr(args, "plan", False)),
+        "resume_from_checkpoint": resuming,
         "cli_scope_globs": list(getattr(args, "include_globs", None) or []),
         "_test_emit_guard": {},
         "clarify": clarify,

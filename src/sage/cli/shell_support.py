@@ -109,6 +109,9 @@ SHELL_BUILTIN_COMMANDS: frozenset[str] = frozenset(
         "models",
         "context",
         "clear",
+        "compact",
+        "history",
+        "info",
         "exit",
         "quit",
         "reset",
@@ -235,6 +238,7 @@ def _print_commands_table_content() -> None:
     c.print(
         "  [muted]Shell-only:[/muted] [accent]/help[/accent]  [accent]/commands[/accent]  "
         "[accent]/skill[/accent]  [accent]/model[/accent]  [accent]/context[/accent]  [accent]/clear[/accent]  "
+        "[accent]/compact[/accent]  [accent]/history[/accent]  "
         "[accent]/reset[/accent]  [accent]/refresh[/accent]  [accent]/chat[/accent]  [accent]/agent[/accent]"
     )
     c.print()

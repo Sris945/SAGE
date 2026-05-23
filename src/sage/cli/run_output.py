@@ -41,6 +41,9 @@ class RunReport:
     human_checkpoints_reached: int | None = None
     cross_file_review: dict | None = None
     """Serialised CrossFileReviewResult (or None if skipped/not run)."""
+    files_written: list[str] = field(default_factory=list)
+    files_edited: list[str] = field(default_factory=list)
+    tokens_used: int = 0
 
 
 def _truncate(s: str, max_len: int = 160) -> str:
@@ -117,6 +120,10 @@ def build_run_report(state: dict) -> RunReport:
 
     cfr = state.get("cross_file_review_result")
 
+    fw = [str(f) for f in (state.get("files_written") or []) if f]
+    fe = [str(f) for f in (state.get("files_edited") or []) if f]
+    tokens_used = int(state.get("tokens_used") or 0)
+
     return RunReport(
         goal=goal or "[muted](no goal text in state)[/muted]",
         plan_only=bool(state.get("plan_only")),
@@ -128,6 +135,9 @@ def build_run_report(state: dict) -> RunReport:
         failed=failed,
         blocked=blocked,
         how_to_run_hint=hint,
+        files_written=fw,
+        files_edited=fe,
+        tokens_used=tokens_used,
         metrics_path=metrics_path,
         orchestrator_interventions=orch_iv,
         human_checkpoints_reached=chk_n,
@@ -218,16 +228,24 @@ def print_run_report(report: RunReport, *, level: str | None = None) -> None:
             c.print(Panel(table, title="[brand]Plan[/brand]", border_style="#0f766e"))
             c.print()
 
-        # Files
-        if report.artifacts:
-            lines = ["[bold]•[/bold] " + p for _, p in report.artifacts]
-            body = "\n".join(lines[:40])
-            if len(report.artifacts) > 40:
-                body += f"\n[dim]… +{len(report.artifacts) - 40} more[/dim]"
+        # Files changed (from tool-loop tracking — most accurate)
+        changed_lines: list[str] = []
+        for f in report.files_written:
+            changed_lines.append("[bold green]+ new[/bold green]  " + escape(f))
+        for f in report.files_edited:
+            if f not in report.files_written:
+                changed_lines.append("[bold #fbbf24]~ edit[/bold #fbbf24] " + escape(f))
+        # Fall back to artifacts if loop tracking is empty
+        if not changed_lines and report.artifacts:
+            changed_lines = ["[bold]•[/bold] " + p for _, p in report.artifacts]
+        if changed_lines:
+            body = "\n".join(changed_lines[:40])
+            if len(changed_lines) > 40:
+                body += f"\n[dim]… +{len(changed_lines) - 40} more[/dim]"
             c.print(
                 Panel.fit(
                     body,
-                    title="[brand]Files touched[/brand]",
+                    title="[brand]Files changed[/brand]",
                     border_style="#0f766e",
                     padding=(0, 1),
                 )
@@ -283,6 +301,9 @@ def print_run_report(report: RunReport, *, level: str | None = None) -> None:
             f"[muted]failed[/muted] [accent]{report.failed}[/accent]",
             f"[muted]blocked[/muted] {report.blocked}",
         ]
+        if report.tokens_used > 0:
+            tok_k = report.tokens_used / 1000
+            bits.append(f"[muted]tokens[/muted] ~{tok_k:.1f}k")
         foot = "  ·  ".join(bits)
         if report.last_error:
             foot += (
@@ -322,7 +343,12 @@ def _print_run_report_plain(report: RunReport) -> None:
         print(
             f"  {t.get('id')} [{t.get('status')}] {t.get('assigned_agent')}: {t.get('description')}"
         )
-    if report.artifacts:
+    changed = [(f, "new") for f in report.files_written] + [(f, "edit") for f in report.files_edited if f not in report.files_written]
+    if changed:
+        print("\n--- Files changed ---")
+        for f, kind in changed:
+            print(f"  [{kind}] {f}")
+    elif report.artifacts:
         print("\n--- Files ---")
         for _, p in report.artifacts:
             print(f"  {p}")

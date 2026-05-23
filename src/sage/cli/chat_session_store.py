@@ -143,6 +143,40 @@ def load_transcript_text(*, max_chars: int) -> str:
     return text
 
 
+def load_messages_from_session(session_path: Path | str, max_chars: int = 24_000) -> list[dict]:
+    """
+    Reload prior conversation turns from a JSONL session file.
+    Returns a list of {role, content} dicts (no system message — caller adds that).
+    Trims oldest turns when total chars would exceed max_chars.
+    """
+    p = Path(session_path)
+    if not p.is_file() or p.stat().st_size == 0:
+        return []
+    turns: list[dict] = []
+    try:
+        for line in p.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                o = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            role = str(o.get("role") or "").strip()
+            content = str(o.get("content") or "").strip()
+            if role in ("user", "assistant") and content:
+                turns.append({"role": role, "content": content})
+    except OSError:
+        return []
+
+    # Trim from the front until we're under budget
+    total = sum(len(t["content"]) for t in turns)
+    while turns and total > max_chars:
+        total -= len(turns[0]["content"])
+        turns.pop(0)
+    return turns
+
+
 def maybe_prepend_chat_transcript(user_prompt: str) -> str:
     """If a chat session file exists and attach is enabled, prepend to the pipeline prompt."""
     raw = (os.environ.get("SAGE_CHAT_ATTACH_TO_RUN") or "1").strip().lower()

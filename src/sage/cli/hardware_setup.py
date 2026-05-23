@@ -400,6 +400,18 @@ def suggest_ollama_stack(
         }
         pull_set = {tiny_primary, tiny_fallback, med, embed}
 
+    # Shell roles always use the fastest available models (latency-sensitive)
+    routing["shell_router"] = {
+        "primary": tiny_primary,
+        "fallback": tiny_fallback if tiny_fallback != tiny_primary else tiny_primary,
+        "fallback_triggers": ["primary_failure_count >= 2"],
+    }
+    routing["shell_chat"] = {
+        "primary": tiny_fallback if tiny_fallback != tiny_primary else tiny_primary,
+        "fallback": routing.get("coder", {}).get("fallback", tiny_fallback),
+        "fallback_triggers": ["primary_failure_count >= 2"],
+    }
+
     # Trim to disk budget: drop largest optional model first (keep tiny + embed)
     def _estimate(s: set[str]) -> float:
         return sum(_MODEL_SIZES_GIB.get(t, 2.0) for t in s)
