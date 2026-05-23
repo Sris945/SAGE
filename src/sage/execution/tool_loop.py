@@ -283,6 +283,7 @@ class ToolLoopEngine:
                 logger.warning("Could not load checkpoint: %s", exc)
 
         _context_warned = False
+        _context_window = _get_context_window(self.model)
 
         while turn < self.max_turns:
             turn += 1
@@ -297,18 +298,30 @@ class ToolLoopEngine:
                     ),
                 })
 
-            # Context size warning — fires once when messages exceed ~80K chars (~20K tokens)
-            if not _context_warned:
-                ctx_chars = sum(len(str(m.get("content", ""))) for m in messages)
-                if ctx_chars > 80_000:
-                    _context_warned = True
-                    messages.append({
-                        "role": "user",
-                        "content": (
-                            "[SYSTEM] Context is growing large. Avoid re-reading files you've already "
-                            "read. Summarise completed work mentally and call done as soon as possible."
-                        ),
-                    })
+            # Context budget: estimate tokens, warn at 80%, prune/compact at 90%
+            ctx_tokens = _estimate_tokens(messages)
+            ctx_pct = ctx_tokens / _context_window if _context_window else 0.0
+            if ctx_pct >= 0.9:
+                _auto_compact = os.environ.get("SAGE_AUTO_COMPACT", "0") == "1"
+                if _auto_compact:
+                    messages = _auto_compact_messages(messages, self.chat_fn, self.model)
+                else:
+                    messages = _prune_messages(messages)
+                ctx_tokens = _estimate_tokens(messages)
+                ctx_pct = ctx_tokens / _context_window if _context_window else 0.0
+                logger.info("Context reduced: %d tokens (%.0f%% of %d)",
+                            ctx_tokens, ctx_pct * 100, _context_window)
+            if not _context_warned and ctx_pct >= 0.8:
+                _context_warned = True
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        f"[SYSTEM] Context is at {ctx_pct:.0%} of the model's limit "
+                        f"({ctx_tokens:,} / {_context_window:,} tokens). "
+                        "Avoid re-reading files already in context. "
+                        "Wrap up remaining work and call done as soon as possible."
+                    ),
+                })
 
             # ── LLM call ──────────────────────────────────────────────────
             try:
@@ -447,15 +460,17 @@ class ToolLoopEngine:
                     error=tool_result.error,
                 )
 
-            # Track mutations
+            # Track mutations and incrementally update the Qdrant index
             if tool_name == "write_file" and tool_result.success:
                 path = str(args.get("path", ""))
                 if path and path not in result.files_written:
                     result.files_written.append(path)
+                _trigger_index_update([path])
             elif tool_name in ("edit_file", "search_replace", "append_file") and tool_result.success:
                 path = str(args.get("path", ""))
                 if path and path not in result.files_edited:
                     result.files_edited.append(path)
+                _trigger_index_update([path])
             elif tool_name == "move_file" and tool_result.success:
                 src = str(args.get("source", ""))
                 dst = str(args.get("destination", ""))
@@ -463,6 +478,7 @@ class ToolLoopEngine:
                     result.files_edited.append(src)
                 if dst and dst not in result.files_written:
                     result.files_written.append(dst)
+                _trigger_index_update([src, dst])
             elif tool_name in ("run_command", "run_tests") and tool_result.success:
                 cmd = str(args.get("command", "") or args.get("path", "") or "run_tests")
                 result.commands_run.append(cmd)
@@ -540,6 +556,140 @@ def _stream_turn(
             break
     status = "ok" if result.success else f"ERROR: {result.error[:50]}"
     print(f"  [{turn:02d}/{max_turns}] {tool_name}{key_arg} → {status}", flush=True)
+
+
+def _trigger_index_update(paths: list[str]) -> None:
+    """Fire-and-forget: incrementally re-index changed files if a Qdrant index exists."""
+    try:
+        root = Path(os.environ.get("SAGE_WORKSPACE_ROOT", ".")).resolve()
+        from sage.memory.code_indexer import incremental_update
+        file_paths = [Path(p) for p in paths if p]
+        incremental_update(root, file_paths)
+    except Exception:
+        pass  # indexing is non-critical; never break the tool loop
+
+
+def _get_context_window(model: str) -> int:
+    """Return the known context window (tokens) for a model, falling back to 8192."""
+    try:
+        from sage.orchestrator.model_router import ModelRouter
+        router = ModelRouter()
+        for role_cfg in (router.config.get("routing") or {}).values():
+            if isinstance(role_cfg, dict):
+                for key in ("primary", "fallback"):
+                    if role_cfg.get(key) == model:
+                        cw = role_cfg.get("context_window")
+                        if cw:
+                            return int(cw)
+    except Exception:
+        pass
+    # Hardcoded fallbacks for common models
+    _KNOWN: dict[str, int] = {
+        "qwen2.5-coder:1.5b": 32768,
+        "qwen2.5-coder:7b-instruct-q4_K_M": 32768,
+        "qwen2.5-coder:14b-instruct-q4_K_M": 32768,
+        "qwen2.5-coder:32b-instruct-q4_K_M": 32768,
+        "llama3.2:3b": 131072,
+        "phi3:mini": 131072,
+    }
+    return _KNOWN.get(model, 8192)
+
+
+def _estimate_tokens(messages: list[dict]) -> int:
+    """Fast token estimate: 1 token ≈ 4 chars (cl100k approximation)."""
+    total_chars = sum(len(str(m.get("content", ""))) for m in messages)
+    return total_chars // 4
+
+
+def _prune_messages(messages: list[dict]) -> list[dict]:
+    """
+    Remove oldest non-system messages to bring context back under ~70% usage.
+
+    Rules:
+    - Never drop the system prompt (role == "system")
+    - Always keep the last 6 messages (recent context the model needs)
+    - Prefer dropping large tool-result messages before short assistant messages
+    - Insert a tombstone so the model knows history was trimmed
+    """
+    if len(messages) <= 8:
+        return messages
+
+    system_msgs = [m for m in messages if m.get("role") == "system"]
+    non_system = [m for m in messages if m.get("role") != "system"]
+
+    keep_tail = non_system[-6:]
+    droppable = non_system[:-6]
+
+    if not droppable:
+        return messages
+
+    droppable.sort(key=lambda m: len(str(m.get("content", ""))), reverse=True)
+    n_drop = max(1, len(droppable) // 2)
+    dropped = droppable[:n_drop]
+    kept_middle = droppable[n_drop:]
+
+    tombstone = {
+        "role": "user",
+        "content": (
+            f"[SYSTEM] {len(dropped)} earlier message(s) were pruned to stay within "
+            "the context window. The task description and recent tool results are preserved."
+        ),
+    }
+
+    return system_msgs + kept_middle + [tombstone] + keep_tail
+
+
+def _auto_compact_messages(
+    messages: list[dict],
+    chat_fn: Any,
+    model: str,
+) -> list[dict]:
+    """
+    LLM-based mid-loop compression (SAGE_AUTO_COMPACT=1).
+
+    Summarises the oldest half of non-system messages into ≤200 words,
+    replaces them with the summary. Falls back to _prune_messages on any error.
+    """
+    system_msgs = [m for m in messages if m.get("role") == "system"]
+    non_system = [m for m in messages if m.get("role") != "system"]
+
+    if len(non_system) < 8:
+        return messages
+
+    mid = len(non_system) // 2
+    to_summarise = non_system[:mid]
+    keep_tail = non_system[mid:]
+
+    summary_prompt = (
+        "Summarise the following conversation excerpt in under 200 words. "
+        "Focus on: what files were read, what edits were made, what tests ran, "
+        "and what remains to be done. Be concise and factual.\n\n"
+        + "\n".join(
+            f"[{m['role']}] {str(m.get('content', ''))[:400]}"
+            for m in to_summarise
+        )
+    )
+
+    try:
+        summary_text = chat_fn(
+            messages=[
+                {"role": "system", "content": "You are a concise technical summariser."},
+                {"role": "user", "content": summary_prompt},
+            ],
+            model=model,
+            options={"temperature": 0.0},
+        )
+        summary_msg = {
+            "role": "user",
+            "content": (
+                f"[SYSTEM — auto-compacted {len(to_summarise)} messages]\n{summary_text.strip()}"
+            ),
+        }
+        logger.info("Auto-compact: summarised %d messages into 1", len(to_summarise))
+        return system_msgs + [summary_msg] + keep_tail
+    except Exception as exc:
+        logger.warning("Auto-compact LLM call failed (%s), falling back to prune", exc)
+        return _prune_messages(messages)
 
 
 def _save_checkpoint(path: Path, messages: list[dict], result: "LoopResult") -> None:
